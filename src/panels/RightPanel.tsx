@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { Editor } from '../editor/useEditor';
 import { MAX_S, MIN_S, niceStep } from '../editor/view';
-import { PARAM_DEFS, paramRange } from '../model/device';
+import { NOMINAL, PARAM_DEFS, deltaRange, displayCut } from '../model/device';
 import { bboxOf, edgeFrame, edgeLength, polyOf } from '../model/geometry';
 import { MATERIALS, materialOf } from '../model/materials';
 import type { Model, Region } from '../model/types';
@@ -59,32 +59,37 @@ function DeviceParamsPanel({ ed }: { ed: Editor }) {
         </thead>
         <tbody>
           {PARAM_DEFS.map((d) => {
-            const [lo, hi] = paramRange(d.key, p);
+            const c = displayCut(ed.cut, d.key);
+            const nom = NOMINAL[c][d.key]!;
+            const [lo, hi] = deltaRange(d.key, p);
+            const delta = base ? p[d.key] - base[d.key] : 0;
             return (
               <tr key={d.key} className={active === d.key ? 'active' : undefined} title={d.desc}>
                 <td>
                   <b>{d.label}</b>
                   <small className="dim block">{d.desc}</small>
                 </td>
-                <td className="mono">{d.cuts.map((c) => cutName[c]).join('/')}</td>
+                <td className="mono">
+                  {d.cuts.map((k) => (
+                    <span key={k} className={k === c ? 'curcut' : undefined}>{cutName[k]}</span>
+                  ))}
+                </td>
                 <td>
                   <div className="pval">
-                    <NumField label="" value={p[d.key]} step={d.key === 'Tox' ? 0.1 : 1} onChange={(v) => ed.setParamValue(d.key, v)} width={74} />
-                    {base && Math.abs(p[d.key] - base[d.key]) >= 0.05 && (
-                      <small className={p[d.key] > base[d.key] ? 'up' : 'dn'}>
-                        {p[d.key] > base[d.key] ? '+' : ''}{(p[d.key] - base[d.key]).toFixed(1)}
-                      </small>
+                    <NumField label="" value={nom + p[d.key]} step={d.key === 'Tox' ? 0.1 : 1} onChange={(v) => ed.setParamValue(d.key, v - nom)} width={74} />
+                    {Math.abs(delta) >= 0.05 && (
+                      <small className={delta > 0 ? 'up' : 'dn'}>{delta > 0 ? '+' : ''}{delta.toFixed(1)}</small>
                     )}
                   </div>
                 </td>
-                <td className="mono dim">{fmt(lo)}–{fmt(hi)}</td>
+                <td className="mono dim">{fmt(nom + lo)}–{fmt(nom + hi)}</td>
               </tr>
             );
           })}
         </tbody>
       </table>
       <small className="dim">
-        邊模式下橘色虛線的邊綁定參數：拖它就是改參數，其他剖面的對應頂點同步位移；自由編輯只影響目前剖面。
+        prototype 各剖面原尺寸不同，數值顯示粗體剖面的實際值；改動量 Δ 同步套到其他剖面。邊模式下橘色虛線的邊綁定參數，拖它就是改參數；自由編輯只影響目前剖面。
       </small>
     </Section>
   );

@@ -3,7 +3,7 @@ import type { Material } from './types';
 export const MATERIALS: Material[] = [
   { id: 'si', name: 'Si (p)', fill: '#ddd8cb' },
   { id: 'si_n', name: 'Si n+', fill: '#f3b9a1' },
-  { id: 'fin', name: 'Si fin', fill: '#f0c9a8' },
+  { id: 'fin', name: 'Si fin', fill: '#f3b9a1' },
   { id: 'sio2', name: 'SiO₂', fill: '#9fd3e8' },
   { id: 'poly', name: 'Poly-Si', fill: '#e8604c' },
   { id: 'sin', name: 'SiN', fill: '#c9b6e8' },

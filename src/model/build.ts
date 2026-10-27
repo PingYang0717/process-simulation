@@ -40,7 +40,7 @@ export function buildModel(specs: RegionSpec[], world: World): Model {
       const len = Math.sqrt(len2);
       const onEdge: { id: string; t: number }[] = [];
       for (const v of all) {
-        if (v.id === a.id || v.id === b.id) continue;
+        if (r.loop.includes(v.id)) continue;
         const t = ((v.x - a.x) * dx + (v.y - a.y) * dy) / len2;
         if (t <= 1e-6 || t >= 1 - 1e-6) continue;
         const cross = Math.abs((v.x - a.x) * dy - (v.y - a.y) * dx) / len;

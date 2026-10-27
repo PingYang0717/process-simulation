@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { applyParams, bindingOf, initialDoc, sensitivity, setParam } from '../model/device';
+import { applyParams, bindingOf, displayCut, initialDoc, sensitivity, setParam, valueIn } from '../model/device';
 import type { Binding } from '../model/device';
 import { bboxOf, centroid, edgeFrame, edgesOf, polyOf, projectOnSegment, r1 } from '../model/geometry';
 import { insertBump, insertVertexOnEdge, moveVertices, setMaterial as setMat, setVertexPos } from '../model/ops';
@@ -197,7 +197,7 @@ export function useEditor() {
       const p0 = g.startDoc.params[param];
       const params = setParam(g.startDoc.params, param, p0 + dn / k);
       setDoc(applyParams(g.startDoc, params));
-      setDrag({ at: nm, dx, dy, dn: r1(dn), param: { key: param, value: params[param], delta: r1(params[param] - p0) } });
+      setDrag({ at: nm, dx, dy, dn: r1(dn), param: { key: param, value: valueIn(displayCut(c, param), param, params)!, delta: r1(params[param] - p0) } });
       return;
     }
     const delta = new Map<string, XY>(g.verts.map((id) => [id, [dx, dy]]));

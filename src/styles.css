@@ -91,3 +91,5 @@ small.up { color: var(--up); } small.dn { color: var(--dn); }
 .chk { display: flex; gap: 6px; align-items: center; font-size: 12px; }
 .hit:hover { filter: brightness(1.06); }
 .halo { paint-order: stroke; stroke: #fff; stroke-width: 3px; }
+.curcut { font-weight: 600; color: var(--ink); }
+table.params td:nth-child(2) span + span::before { content: '/'; color: var(--faint); font-weight: 400; }

@@ -3,7 +3,7 @@ import type { MouseEvent as RMouseEvent, PointerEvent as RPointerEvent } from 'r
 import type { Editor } from '../editor/useEditor';
 import { niceStep, toNm, toPx } from '../editor/view';
 import type { View } from '../editor/view';
-import { bboxOf, centroid, pointInPoly, polyOf, projectOnSegment } from '../model/geometry';
+import { bboxOf, centroid, polyOf, projectOnSegment } from '../model/geometry';
 import { materialOf } from '../model/materials';
 import { PARAM_DEFS } from '../model/device';
 import type { XY } from '../model/types';
@@ -12,10 +12,6 @@ const ACCENT = '#1F5EFF';
 const BOUND = '#B7791F';
 const RULER = 20;
 
-const isDark = (hex: string) => {
-  const n = parseInt(hex.slice(1), 16);
-  return 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) < 120;
-};
 const fmt = (v: number) => (Math.abs(v) < 0.05 ? '0' : v.toFixed(1));
 const sgn = (v: number) => (v > 0 ? `+${fmt(v)}` : fmt(v));
 
@@ -161,16 +157,14 @@ export function SectionCanvas({ ed }: { ed: Editor }) {
         </g>
 
         {/* 材質標籤 */}
-        <g fontFamily="var(--mono)" fontSize={10} fill="#1B2430" textAnchor="middle" style={{ pointerEvents: 'none' }}>
+        <g fontSize={10.5} fill="#222" textAnchor="middle" style={{ pointerEvents: 'none' }}>
           {model.regions.map((r) => {
             const pts = polyOf(model, r);
             const b = bboxOf(pts);
-            const textW = [...r.label].reduce((w, ch) => w + (ch.charCodeAt(0) > 255 ? 10 : 6.1), 0) + 6;
-            if ((b.x1 - b.x0) * view.s < textW || (b.y1 - b.y0) * view.s < 14) return null;
-            const c = centroid(pts);
-            if (!pointInPoly(c, pts)) return null; // U 形等凹多邊形，質心落在洞裡就不標
-            const [cx, cy] = P(...c);
-            return <text key={r.id} x={cx} y={cy + 3.5} fill={isDark(materialOf(r.material).fill) ? '#fff' : '#1B2430'}>{r.label}</text>;
+            // 與 prototype 相同：外框至少 30×14 px 才標
+            if ((b.x1 - b.x0) * view.s < 30 || (b.y1 - b.y0) * view.s < 14) return null;
+            const [cx, cy] = P(...centroid(pts));
+            return <text key={r.id} x={cx} y={cy + 3.5}>{r.label}</text>;
           })}
         </g>
 
