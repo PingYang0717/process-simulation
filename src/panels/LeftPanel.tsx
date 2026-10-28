@@ -2,37 +2,35 @@ import { useRef, useState } from 'react';
 import { CUTS } from '../editor/useEditor';
 import type { Editor } from '../editor/useEditor';
 import { decodeImage, importRaster } from '../raster/importRaster';
-import type { Mode, RasterImage } from '../model/types';
-import { NumField, Section } from './ui';
-
-const MODES: [Mode, string][] = [['region', '區域 1'], ['edge', '邊 2'], ['vertex', '頂點 3']];
+import type { RasterImage } from '../model/types';
+import { Section } from './ui';
 
 const KEYS: [string, string][] = [
-  ['點選', '選單一'],
-  ['Shift + 點', '加入選取'],
-  ['Ctrl/⌘ + 點', '切換選取'],
-  ['空白處拖拉', '框選（+Shift 累加）'],
-  ['Ctrl/⌘ + A', '全選'],
-  ['Esc', '取消選取'],
-  ['方向鍵', '微移 1 nm（Shift 10、Alt 0.1）'],
-  ['滾輪', '以游標為中心縮放'],
-  ['Space + 拖／中鍵', '平移（H 切換手形）'],
-  ['+ / − / F', '放大／縮小／適合視窗'],
-  ['Ctrl/⌘ + Z / Y', 'Undo / Redo'],
-  ['1 / 2 / 3', '區域／邊／頂點模式'],
-  ['雙擊邊', '插入頂點（邊模式）'],
+  ['游標靠近頂點', '變十字 → 拖那顆頂點'],
+  ['游標靠近邊', '變雙箭頭 → 推整段平滑邊（Shift 只推一小段）；外層襯層預設跟著走'],
+  ['區域內部', '變四箭頭 → 整塊搬動（鄰居不動，空位回填）'],
+  ['空白處拖拉', '框選區域'],
+  ['Shift / Ctrl 點', '加選 / 切換'],
+  ['按住 V / E / R', '暫時只抓 頂點 / 邊 / 區域'],
+  ['Alt 點邊', '插入頂點'],
+  ['右鍵區域', '材質選單'],
+  ['方向鍵', '1 px（Shift 10 px）'],
+  ['滾輪 / Space 拖', '縮放 / 平移'],
+  ['Ctrl+Z / Y、Esc', 'Undo / Redo、取消'],
 ];
 
-export function LeftPanel({ ed, nmPerPx, setNmPerPx }: { ed: Editor; nmPerPx: number; setNmPerPx: (v: number) => void }) {
+export function LeftPanel({ ed }: { ed: Editor }) {
   const [busy, setBusy] = useState(false);
+  const [minPx, setMinPx] = useState(12);
   const source = useRef<RasterImage | null>(null);
   const cut = CUTS.find((c) => c.id === ed.cut)!;
   const segment = async (img: RasterImage) => {
     setBusy(true);
     await new Promise((r) => setTimeout(r, 0));
-    ed.loadImage(importRaster(img, nmPerPx));
+    ed.loadImage(importRaster(img, ed.nmPerPx, { minPx }));
     setBusy(false);
   };
+  const { imported } = ed;
   return (
     <aside className="left">
       <Section title="TCAD Cut Direction">
@@ -49,7 +47,8 @@ export function LeftPanel({ ed, nmPerPx, setNmPerPx }: { ed: Editor; nmPerPx: nu
 
       <Section title={`輸入影像（${cut.name}）`}>
         <div className="small">
-          {ed.imported.width} × {ed.imported.height} px　{ed.imported.palette.length} 色　{ed.model.regions.length} 區域
+          {imported.width} × {imported.height} px　{imported.palette.length} 色　{ed.model.regions.length} 區域
+          {imported.merged ? `　併入碎片 ${imported.merged}` : ''}
         </div>
         <label className="file">
           <input
@@ -71,41 +70,35 @@ export function LeftPanel({ ed, nmPerPx, setNmPerPx }: { ed: Editor; nmPerPx: nu
           }}
           disabled={busy}
         >
-          載入範例（{cut.desc}）
+          載入範例
         </button>
         <div className="row" style={{ marginTop: 8 }}>
-          <NumField label="1 px = ? nm" value={nmPerPx} onChange={(v) => v > 0 && setNmPerPx(v)} step={0.05} w={110} />
+          <label className="num" style={{ width: 90 }}>
+            <span>1 px = ? nm</span>
+            <input type="number" step={0.05} value={ed.nmPerPx} onChange={(e) => { const v = +e.target.value; if (v > 0) ed.setNmPerPx(v); }} />
+          </label>
+          <label className="num" style={{ width: 90 }}>
+            <span>碎片門檻 px</span>
+            <input type="number" step={1} min={0} value={minPx} onChange={(e) => setMinPx(Math.max(0, +e.target.value))} />
+          </label>
           <button
-            onClick={() => segment(source.current ?? { width: ed.imported.width, height: ed.imported.height, data: ed.imported.original })}
+            onClick={() => segment(source.current ?? { width: imported.width, height: imported.height, data: imported.original })}
             disabled={busy}
           >
             重新分割
           </button>
         </div>
-        <small className="dim">
-          輸出尺寸永遠等於輸入（{ed.imported.width} × {ed.imported.height}），比例只影響顯示的 nm 數值。
-        </small>
+        <small className="dim">載入時不做色彩管理；比例只影響顯示的 nm。小於門檻的色塊會併入鄰居（設 0 表示全部保留）。</small>
       </Section>
 
-      <Section title="選取模式">
-        <div className="seg">
-          {MODES.map(([m, label]) => (
-            <button key={m} className={ed.mode === m ? 'on' : ''} onClick={() => ed.setMode(m)}>{label}</button>
-          ))}
-        </div>
-      </Section>
-
-      <Section title="拖拉規則">
-        <div className="small"><b>區域</b>：整塊搬動，只動自己；空出來的地方用「回填材質」填，搬到的地方蓋在上面。</div>
-        <div className="small"><b>邊／頂點</b>：連動，相鄰材質跟著變形，不留縫。</div>
-        <small className="dim">頂點不會被拖出影像範圍。</small>
-      </Section>
-
-      <Section title="快捷鍵">
+      <Section title="怎麼操作">
         <table className="keys">
           <tbody>
             {KEYS.map(([k, v]) => (
-              <tr key={k}><td>{k}</td><td>{v}</td></tr>
+              <tr key={k}>
+                <td>{k}</td>
+                <td>{v}</td>
+              </tr>
             ))}
           </tbody>
         </table>

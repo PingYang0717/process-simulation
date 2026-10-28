@@ -24,6 +24,16 @@ export function edgesOf(model: Model): Edge[] {
 export const polyOf = (model: Model, region: Region): XY[] =>
   region.loop.map((id) => [model.vertices[id].x, model.vertices[id].y]);
 
+/** 外輪廓與孔洞 */
+export const ringsOf = (region: Region): string[][] => [region.loop, ...(region.holes ?? [])];
+
+/** 點到線段的距離 */
+export function segDist([px, py]: XY, [ax, ay]: XY, [bx, by]: XY): number {
+  const l2 = (bx - ax) ** 2 + (by - ay) ** 2 || 1e-9;
+  const t = Math.max(0, Math.min(1, ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / l2));
+  return Math.hypot(ax + t * (bx - ax) - px, ay + t * (by - ay) - py);
+}
+
 export function pointInPoly([px, py]: XY, pts: XY[]): boolean {
   let inside = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {

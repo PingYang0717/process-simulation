@@ -4,18 +4,19 @@ import type { Underlay } from './canvas/RasterUnderlay';
 import { CUTS, useEditor } from './editor/useEditor';
 import { signed } from './editor/view';
 import { LeftPanel } from './panels/LeftPanel';
-import { ExportPanel, MaterialPanel, ParamsPanel, ScopePanel, SpecPanel, ViewPanel } from './panels/RightPanels';
+import { ExportPanel, MaterialPanel, SpecPanel, ViewPanel } from './panels/RightPanels';
 import { exportRaster } from './raster/exportRaster';
 import type { ExportResult } from './raster/exportRaster';
 import { VOID_ID } from './raster/importRaster';
 
-const NOUN = { region: '區域', edge: '邊', vertex: '頂點' } as const;
+const HOLD = { V: '頂點', E: '邊', R: '區域' } as const;
 
 export function App() {
   const ed = useEditor();
-  const [nmPerPx, setNmPerPx] = useState(0.5);
   const [underlay, setUnderlay] = useState<Underlay>('original');
-  const [alpha, setAlpha] = useState(0.35);
+  const [alpha, setAlpha] = useState(0.3);
+  const [showDiff, setShowDiff] = useState(true);
+  const [showLabels, setShowLabels] = useState(true);
   const [backfill, setBackfill] = useState(VOID_ID);
   const last = useRef<ExportResult | null>(null);
   // 拖拉中沿用上一次的輸出，放開才重算
@@ -26,48 +27,53 @@ export function App() {
     return r;
   }, [ed.imported, ed.model, ed.materials, backfill, ed.dragging]);
   const cut = CUTS.find((c) => c.id === ed.cut)!;
+  const h = ed.hover;
+  const labelOf = (id: string) => ed.model.regions.find((r) => r.id === id)?.label;
+  const pointing = h.kind === 'vertex' ? `頂點 ${h.id}` : h.kind === 'edge' ? `邊 ×${h.group.length}（${labelOf(h.region)}）` : h.kind === 'region' ? labelOf(h.id) : '';
 
   return (
     <div className="app">
-      <LeftPanel ed={ed} nmPerPx={nmPerPx} setNmPerPx={setNmPerPx} />
+      <LeftPanel ed={ed} />
       <main className="center">
         <div className="ctool">
           <span className="title">
-            {cut.name} <small>{cut.desc}｜PNG → 分割 → 編輯 → PNG</small>
+            {cut.name} <small>PNG → 分割 → 編輯 → PNG</small>
           </span>
           <span className="grow" />
           <button onClick={ed.undo} disabled={!ed.history.length}>↶ Undo {ed.history.length || ''}</button>
           <button onClick={ed.redo} disabled={!ed.future.length}>↷ Redo {ed.future.length || ''}</button>
           <button onClick={ed.selectAll}>全選</button>
-          <button onClick={ed.clearSelection} disabled={!ed.selected.length}>取消選取</button>
+          <button onClick={ed.clearSel} disabled={!ed.regionSel.length}>取消選取</button>
           <button onClick={ed.reset}>重設</button>
         </div>
-        <SectionCanvas ed={ed} underlay={underlay} outputData={result.data} overlayAlpha={alpha} />
+        <SectionCanvas ed={ed} underlay={underlay} result={result} overlayAlpha={alpha} showDiff={showDiff} showLabels={showLabels} />
         <div className="status">
           {ed.delta ? (
             <span className="hot">
-              Δx {signed(ed.delta.dx)} nm，Δy {signed(ed.delta.dy)} nm{ed.delta.normal !== null && `，法向 ${signed(ed.delta.normal)} nm`}
+              Δx {signed(ed.delta.dx)} px，Δy {signed(ed.delta.dy)} px
+              {ed.delta.normal !== null && `，法向 ${signed(ed.delta.normal, 1)} px`}
+              {ed.followInfo.layers ? `｜連帶 ${ed.followInfo.layers} 層` : ''}
+              {ed.followInfo.blocked ? '｜已擋住（會穿層）' : ''}
             </span>
           ) : (
             <span>
-              已選 {ed.selected.length} 個{NOUN[ed.mode]}
-              {ed.selected.length ? `（${ed.movingVertices.size} 個頂點）` : ''}
-              {ed.mode !== 'region' && ed.scope.length ? `｜範圍 ${ed.scope.length} 區域` : ''}
+              {pointing ? `指向：${pointing}　` : ''}已選 {ed.regionSel.length} 區域
+              {ed.edgeSel.length ? `、${ed.edgeSel.length} 邊` : ''}
+              {ed.vertexSel.length ? `、${ed.vertexSel.length} 頂點` : ''}
+              {ed.hold ? `｜只抓${HOLD[ed.hold]}` : ''}
             </span>
           )}
           <span className="grow" />
           <span className="dim">
-            {ed.model.regions.length} 區域／{ed.edges.length} 邊／{Object.keys(ed.model.vertices).length} 頂點｜相異 {result.diffPx.toLocaleString()} px
+            {ed.model.regions.length} 區域／{Object.keys(ed.model.vertices).length} 頂點｜相異 {result.diffPx.toLocaleString()} px
           </span>
         </div>
       </main>
       <aside className="rightbar">
-        <ViewPanel ed={ed} underlay={underlay} setUnderlay={setUnderlay} alpha={alpha} setAlpha={setAlpha} />
-        <ScopePanel ed={ed} />
+        <ViewPanel ed={ed} d={{ underlay, setUnderlay, alpha, setAlpha, showDiff, setShowDiff, showLabels, setShowLabels }} />
         <MaterialPanel ed={ed} />
         <ExportPanel ed={ed} backfill={backfill} setBackfill={setBackfill} result={result} />
         <SpecPanel ed={ed} />
-        <ParamsPanel ed={ed} />
       </aside>
     </div>
   );

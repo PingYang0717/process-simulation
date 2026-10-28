@@ -1,8 +1,9 @@
 /**
  * 連通元件：4 鄰接 flood fill，每個同色色塊一個 label；
- * 小於 minArea 的碎片併入相鄰中面積最大的色塊。回傳重新編號後的 labels 與每個 label 的調色盤索引。
+ * 小於 minArea 的碎片併入相鄰中面積最大的色塊（minArea = 0 全部保留）。
+ * 回傳重新編號後的 labels、每個 label 的調色盤索引與併入的碎片數。
  */
-export function components(index: Uint16Array, W: number, H: number, minArea = 12): { labels: Int32Array; count: number; colorOf: number[] } {
+export function components(index: Uint16Array, W: number, H: number, minArea = 12): { labels: Int32Array; count: number; colorOf: number[]; merged: number } {
   const labels = new Int32Array(W * H).fill(-1);
   const color: number[] = [];
   const area: number[] = [];
@@ -47,6 +48,7 @@ export function components(index: Uint16Array, W: number, H: number, minArea = 1
     if (best >= 0) parent[id] = best;
   }
 
+  const merged = parent.filter((p, i) => p !== i).length;
   const root = (i: number) => {
     while (parent[i] !== i) i = parent[i];
     return i;
@@ -61,5 +63,5 @@ export function components(index: Uint16Array, W: number, H: number, minArea = 1
     }
   }
   for (let p = 0; p < W * H; p++) labels[p] = renum.get(root(labels[p]))!;
-  return { labels, count: colorOf.length, colorOf };
+  return { labels, count: colorOf.length, colorOf, merged };
 }

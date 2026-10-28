@@ -1,4 +1,4 @@
-/** 三張範例圖（640×360），與 prototype v2 逐像素相同；只在沒有輸入時用 */
+/** 三張範例圖（640×360），與 prototype v3 逐像素相同；只在沒有輸入時用 */
 import { KNOWN_MATERIALS, fromHex } from './color';
 import type { RasterImage } from '../model/types';
 

@@ -1,5 +1,5 @@
-import { bboxOf, r1 } from '../model/geometry';
-import type { Material, Model, Region, Vertex, XY } from '../model/types';
+import { bboxOf, edgeKey } from '../model/geometry';
+import type { ExactSeg, Material, Model, Region, Vertex, XY } from '../model/types';
 
 /** 一條邊界鏈：像素格點座標，left/right 為兩側的 label（-1 = 影像外） */
 export interface Chain { pts: XY[]; left: number; right: number }
@@ -98,14 +98,15 @@ export function traceChains(labels: Int32Array, W: number, H: number): Chain[] {
 }
 
 /**
- * 鏈 → Model：每條鏈簡化一次，端點以座標共用，所以相鄰區域自然得到共用頂點、不留縫。
+ * 鏈 → Model（px）：每條鏈簡化一次，端點以座標共用，所以相鄰區域自然得到共用頂點、不留縫。
+ * 簡化後每一段記下它在原始鏈上對應的像素輪廓（exact），輸出時沒拖到的段沿用它。
  * 每個 label 收集「左側是我」的鏈（正向）與「右側是我」的鏈（反向）串成環；
  * 外框最大的環為外輪廓，其餘為孔洞。區域依外框面積由大到小排序。
  */
 export function chainsToModel(
   chains: Chain[], count: number, colorOf: number[], materials: Material[],
-  nmPerPx: number, W: number, H: number, tol = 0.6,
-): Model {
+  W: number, H: number, tol = 0.6,
+): { model: Model; exact: Map<string, ExactSeg> } {
   const vertices: Record<string, Vertex> = {};
   const shared = new Map<string, string>();
   let n = 0;
@@ -116,12 +117,24 @@ export function chainsToModel(
       if (hit) return hit;
     }
     const id = `v${n++}`;
-    vertices[id] = { id, x: r1(x * nmPerPx), y: r1(y * nmPerPx) };
+    vertices[id] = { id, x, y };
     if (isEnd) shared.set(key, id);
     return id;
   };
   const simple = chains.map((c) => ({ ...c, pts: simplify(c.pts, tol) }));
   const ids = simple.map((c) => c.pts.map((p, i) => vid(p, i === 0 || i === c.pts.length - 1)));
+  const exact = new Map<string, ExactSeg>();
+  chains.forEach((c, ci) => {
+    const kept = simple[ci].pts, vids = ids[ci];
+    let from = 0;
+    for (let k = 0; k + 1 < kept.length; k++) {
+      let to = from + 1;
+      while (to < c.pts.length && !(c.pts[to][0] === kept[k + 1][0] && c.pts[to][1] === kept[k + 1][1])) to++;
+      if (to >= c.pts.length) break;
+      exact.set(edgeKey(vids[k], vids[k + 1]), { from: vids[k], pts: c.pts.slice(from, to + 1) });
+      from = to;
+    }
+  });
   const area = (loop: string[]) => {
     const b = bboxOf(loop.map((v) => [vertices[v].x, vertices[v].y]));
     return (b.x1 - b.x0) * (b.y1 - b.y0);
@@ -175,5 +188,5 @@ export function chainsToModel(
   });
   for (const id of Object.keys(vertices)) if (!referenced.has(id)) delete vertices[id];
   regions.sort((a, b) => area(b.loop) - area(a.loop));
-  return { vertices, regions, world: { x0: 0, x1: W * nmPerPx, yTop: 0, yBot: H * nmPerPx } };
+  return { model: { vertices, regions, world: { x0: 0, x1: W, yTop: 0, yBot: H } }, exact };
 }

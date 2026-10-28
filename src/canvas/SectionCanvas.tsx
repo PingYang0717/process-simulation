@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
-import type { MouseEvent as RMouseEvent, PointerEvent as RPointerEvent } from 'react';
+import type { PointerEvent as RPointerEvent } from 'react';
 import type { Editor } from '../editor/useEditor';
 import { niceStep, signed } from '../editor/view';
-import { bboxOf, pointInPoly, polyOf } from '../model/geometry';
-import { materialOf } from '../raster/exportRaster';
+import { isCorner } from '../model/drag';
+import { bboxOf, pointInPoly, polyOf, ringsOf } from '../model/geometry';
 import type { XY } from '../model/types';
+import type { ExportResult } from '../raster/exportRaster';
+import { materialOf } from '../raster/exportRaster';
+import { VOID_ID } from '../raster/importRaster';
 import { RasterUnderlay } from './RasterUnderlay';
 import type { Underlay } from './RasterUnderlay';
 
 const ACCENT = '#1F5EFF';
+const HOVER = '#F59E0B';
+const MONO = 'ui-monospace, Menlo, monospace';
 
 /** 標籤位置：在 12 條水平掃描線中找最寬、且上下各半個字高仍在多邊形內的區段 */
 function labelAnchor(pts: XY[], minW: number, textH: number): XY | null {
@@ -34,10 +39,13 @@ function labelAnchor(pts: XY[], minW: number, textH: number): XY | null {
   return best?.p ?? null;
 }
 
-export function SectionCanvas({ ed, underlay, outputData, overlayAlpha }: { ed: Editor; underlay: Underlay; outputData?: Uint8ClampedArray; overlayAlpha: number }) {
+export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, showLabels }: {
+  ed: Editor; underlay: Underlay; result: ExportResult; overlayAlpha: number; showDiff: boolean; showLabels: boolean;
+}) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 600, h: 500 });
+  const [normalPx, setNormalPx] = useState(2);
   const pan = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
   const spaceDown = useRef(false);
 
@@ -82,197 +90,190 @@ export function SectionCanvas({ ed, underlay, outputData, overlayAlpha }: { ed: 
     };
   }, []);
 
-  const { model, mode, view } = ed;
+  const { model, view, hover } = ed;
   const { w, h } = size;
-  const nmPerPx = ed.imported.nmPerPx;
+  const k = ed.nmPerPx;
   const P = (x: number, y: number): XY => [x * view.s + view.tx, y * view.s + view.ty];
-  const nmAt = (e: { clientX: number; clientY: number }) => {
+  const pxAt = (e: { clientX: number; clientY: number }) => {
     const r = svgRef.current!.getBoundingClientRect();
     return { x: (e.clientX - r.left - view.tx) / view.s, y: (e.clientY - r.top - view.ty) / view.s };
   };
-  const mods = (e: RPointerEvent) => ({ shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
-  const capture = (e: RPointerEvent) => svgRef.current?.setPointerCapture(e.pointerId);
+  const local = (e: { clientX: number; clientY: number }) => {
+    const r = svgRef.current!.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
   const isPan = (e: RPointerEvent) => ed.panMode || spaceDown.current || e.button === 1;
 
-  const onBgDown = (e: RPointerEvent) => {
-    capture(e);
+  const onDown = (e: RPointerEvent) => {
+    svgRef.current?.setPointerCapture(e.pointerId);
     if (isPan(e)) {
       pan.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty };
       return;
     }
-    if (e.button === 0) ed.pointerDownBackground(nmAt(e), mods(e));
-  };
-  const itemDown = (id: string) => (e: RPointerEvent) => {
-    if (isPan(e)) { onBgDown(e); return; }
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    capture(e);
-    ed.pointerDownItem(id, nmAt(e), mods(e));
+    if (e.button === 2) {
+      const hit = ed.hitTest(pxAt(e));
+      const region = hit.kind === 'region' ? hit.id : hit.kind === 'none' ? null : hit.region;
+      if (region) {
+        const p = local(e);
+        ed.openMenu(region, p.x, p.y);
+      }
+      return;
+    }
+    if (e.button === 0) ed.pointerDown(pxAt(e), { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
   };
   const onMove = (e: RPointerEvent) => {
     if (pan.current) {
       ed.setView({ s: view.s, tx: pan.current.tx + e.clientX - pan.current.x, ty: pan.current.ty + e.clientY - pan.current.y });
       return;
     }
-    ed.pointerMove(nmAt(e));
-  };
-  // 指標被 svg capture 後 dblclick 的 target 是 svg，所以在這裡找游標下的邊
-  const onDouble = (e: RMouseEvent<SVGSVGElement>) => {
-    if (mode !== 'edge') return;
-    const r = svgRef.current!.getBoundingClientRect();
-    const [px, py] = [e.clientX - r.left, e.clientY - r.top];
-    let best: string | undefined, bd = 6;
-    for (const edge of ed.edges) {
-      if (!inScope(edge.regions)) continue;
-      const [ax, ay] = P(model.vertices[edge.a].x, model.vertices[edge.a].y);
-      const [bx, by] = P(model.vertices[edge.b].x, model.vertices[edge.b].y);
-      const len2 = (bx - ax) ** 2 + (by - ay) ** 2 || 1;
-      const t = Math.max(0, Math.min(1, ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / len2));
-      const d = Math.hypot(px - (ax + t * (bx - ax)), py - (ay + t * (by - ay)));
-      if (d < bd) { bd = d; best = edge.key; }
-    }
-    if (best) ed.splitEdgeAt(best, nmAt(e));
+    ed.pointerMove(pxAt(e));
   };
 
-  const sel = new Set(ed.selected);
-  const scope = new Set(ed.scope);
-  const scopeVerts = new Set<string>();
-  if (scope.size) model.regions.filter((r) => scope.has(r.id)).forEach((r) => r.loop.forEach((v) => scopeVerts.add(v)));
-  const inScope = (regions: string[]) => !scope.size || regions.some((r) => scope.has(r));
-  const vertInScope = (id: string) => !scope.size || scopeVerts.has(id);
+  // 游標：角 → 十字、邊 → 垂直於邊的雙箭頭、區域 → 四箭頭
+  const cursor = ed.panMode ? 'grab'
+    : hover.kind === 'vertex' ? 'crosshair'
+    : hover.kind === 'edge' ? (() => {
+      const e = ed.edgeByKey.get(hover.key);
+      if (!e) return 'move';
+      const A = model.vertices[e.a], B = model.vertices[e.b];
+      return Math.abs(B.x - A.x) > Math.abs(B.y - A.y) ? 'ns-resize' : 'ew-resize';
+    })()
+    : hover.kind === 'region' ? 'move' : 'default';
 
-  const step = niceStep(view.s);
+  const regionSel = new Set(ed.regionSel);
+  const edgeSel = new Set(ed.edgeSel);
+  const vertexSel = new Set(ed.vertexSel);
+  const hoverEdges = new Set(hover.kind === 'edge' ? hover.group : []);
+  const hoverVertex = hover.kind === 'vertex' ? hover.id : null;
+  const hoverRegion = hover.kind === 'region' ? hover.id : null;
+
+  // 格線以 nm 取整，標籤顯示 nm
+  const step = niceStep(view.s / k) / k;
   const gx: number[] = [], gy: number[] = [];
-  for (let x = Math.floor(-view.tx / view.s / step) * step; x <= (w - view.tx) / view.s; x += step) gx.push(Math.round(x * 1e6) / 1e6);
-  for (let y = Math.floor(-view.ty / view.s / step) * step; y <= (h - view.ty) / view.s; y += step) gy.push(Math.round(y * 1e6) / 1e6);
+  for (let x = Math.floor(-view.tx / view.s / step) * step; x <= (w - view.tx) / view.s; x += step) gx.push(x);
+  for (let y = Math.floor(-view.ty / view.s / step) * step; y <= (h - view.ty) / view.s; y += step) gy.push(y);
+  const nmLabel = (px: number) => {
+    const nm = px * k;
+    return Math.abs(nm) < 1e-9 ? '0' : nm.toFixed(nm % 1 ? 1 : 0);
+  };
+
+  const selBox = (() => {
+    const polys = model.regions.filter((r) => regionSel.has(r.id)).map((r) => polyOf(model, r));
+    return polys.length ? bboxOf(polys.flat()) : null;
+  })();
+  const handlesSelected = ed.edgeSel.length || ed.vertexSel.length;
+  const floatPos = selBox
+    ? (() => {
+      const [x, y] = P(selBox.x1, selBox.y0);
+      return { left: Math.min(w - 300, Math.max(4, x + 12)), top: Math.max(4, Math.min(h - 40, y - 44)) };
+    })()
+    : null;
+
+  const handleVertices = [...new Set(
+    model.regions
+      .filter((r) => ed.activeIds.has(r.id))
+      .flatMap((r) => ringsOf(r).flatMap((ring) => ring.filter((_, i) => ed.hold === 'V' || isCorner(model, ring, i)))),
+  )];
 
   return (
-    <div ref={wrapRef} className="canvas-wrap" style={{ cursor: ed.panMode ? 'grab' : 'default' }}>
-      <RasterUnderlay imported={ed.imported} output={outputData} underlay={underlay} view={view} w={w} h={h} />
+    <div ref={wrapRef} className="canvas-wrap" style={{ cursor }}>
+      <RasterUnderlay imported={ed.imported} output={result.data} diffMask={result.diffMask} showDiff={showDiff} underlay={underlay} view={view} w={w} h={h} />
       <svg
         ref={svgRef}
         width={w}
         height={h}
         style={{ touchAction: 'none', display: 'block', position: 'relative' }}
+        onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={() => (pan.current = null)}
-        onPointerDown={onBgDown}
-        onDoubleClick={onDouble}
         onContextMenu={(e) => e.preventDefault()}
       >
         <rect width={w} height={h} fill={underlay === 'none' ? '#F7F8FA' : 'transparent'} />
 
-        {/* 格線與尺規 */}
+        {/* 格線與尺規（nm） */}
         <g pointerEvents="none">
           {gx.map((x) => {
             const [px] = P(x, 0);
-            return <line key={'gx' + x} x1={px} y1={0} x2={px} y2={h} stroke={x === 0 ? '#B9C2CC' : '#E2E6EC'} strokeOpacity={underlay === 'none' ? 1 : 0.5} />;
+            return <line key={'gx' + x} x1={px} y1={0} x2={px} y2={h} stroke="#9AA4B0" strokeOpacity={underlay === 'none' ? 0.35 : 0.25} />;
           })}
           {gy.map((y) => {
             const [, py] = P(0, y);
-            return <line key={'gy' + y} x1={0} y1={py} x2={w} y2={py} stroke={y === 0 ? '#B9C2CC' : '#E2E6EC'} strokeOpacity={underlay === 'none' ? 1 : 0.5} />;
+            return <line key={'gy' + y} x1={0} y1={py} x2={w} y2={py} stroke="#9AA4B0" strokeOpacity={underlay === 'none' ? 0.35 : 0.25} />;
           })}
           <rect x={0} y={0} width={w} height={16} fill="#EEF1F5" opacity={0.95} />
-          <rect x={0} y={0} width={34} height={h} fill="#EEF1F5" opacity={0.95} />
+          <rect x={0} y={0} width={36} height={h} fill="#EEF1F5" opacity={0.95} />
           {gx.map((x) => {
             const [px] = P(x, 0);
-            return px > 34 ? <text key={'tx' + x} x={px} y={11} fontSize={9.5} textAnchor="middle" fill="#555">{x}</text> : null;
+            return px > 36 ? <text key={'tx' + x} x={px} y={11} fontSize={9.5} textAnchor="middle" fill="#555">{nmLabel(x)}</text> : null;
           })}
           {gy.map((y) => {
             const [, py] = P(0, y);
-            return py > 16 ? <text key={'ty' + y} x={31} y={py + 3.5} fontSize={9.5} textAnchor="end" fill="#555">{y}</text> : null;
+            return py > 16 ? <text key={'ty' + y} x={33} y={py + 3.5} fontSize={9.5} textAnchor="end" fill="#555">{nmLabel(y)}</text> : null;
           })}
           <text x={2} y={11} fontSize={9} fill="#888">nm</text>
         </g>
 
         {/* 區域 */}
         {model.regions.map((r) => {
-          const isSel = mode === 'region' && sel.has(r.id);
-          const isScope = mode !== 'region' && scope.has(r.id);
-          const mat = ed.materials.find((m) => m.id === r.material);
-          const d = [r.loop, ...(r.holes ?? [])]
-            .map((ring) => 'M' + ring.map((v) => P(model.vertices[v].x, model.vertices[v].y).join(',')).join('L') + 'Z')
-            .join(' ');
+          const sel = regionSel.has(r.id), hov = hoverRegion === r.id, act = ed.activeIds.has(r.id);
+          const mat = materialOf(ed.materials, r.material);
+          const d = ringsOf(r).map((ring) => 'M' + ring.map((v) => P(model.vertices[v].x, model.vertices[v].y).join(',')).join('L') + 'Z').join(' ');
           return (
             <path
               key={r.id}
               d={d}
               fillRule="evenodd"
-              fill={mat?.isVoid ? 'url(#voidHatch)' : materialOf(ed.materials, r.material).fill}
-              fillOpacity={mat?.isVoid ? 0.9 : overlayAlpha}
-              opacity={mode !== 'region' && scope.size && !scope.has(r.id) ? 0.45 : 1}
-              stroke={isSel || isScope ? ACCENT : '#4b4b4b'}
-              strokeWidth={isSel ? 3 : isScope ? 2 : 1}
-              strokeDasharray={isScope ? '5 3' : undefined}
+              fill={mat.isVoid ? 'url(#voidHatch)' : mat.fill}
+              fillOpacity={mat.isVoid ? 0.9 : hov ? Math.min(1, overlayAlpha + 0.2) : overlayAlpha}
+              stroke={sel ? ACCENT : act ? '#6B8CFF' : '#4b4b4b'}
+              strokeWidth={sel ? 2.5 : act ? 1.5 : 1}
               strokeLinejoin="round"
-              className={mode === 'region' ? 'hit' : ''}
-              style={{ cursor: ed.panMode ? 'grab' : mode === 'region' ? 'move' : 'default' }}
-              pointerEvents={mode === 'region' ? 'auto' : 'none'}
-              onPointerDown={itemDown(r.id)}
+              pointerEvents="none"
             />
           );
         })}
 
-        {/* 區域標籤 */}
+        {showLabels && (
+          <g pointerEvents="none">
+            {model.regions.map((r) => {
+              const at = labelAnchor(polyOf(model, r), (r.label.length * 7 + 8) / view.s, 16 / view.s);
+              if (!at) return null;
+              const [x, y] = P(...at);
+              return <text key={r.id} x={x} y={y + 3.5} fontSize={10.5} textAnchor="middle" fill="#222">{r.label}</text>;
+            })}
+          </g>
+        )}
+
+        {/* 把手：只在已選或游標所在的區域 */}
         <g pointerEvents="none">
-          {model.regions.map((r) => {
-            const at = labelAnchor(polyOf(model, r), (r.label.length * 7 + 8) / view.s, 16 / view.s);
-            if (!at) return null;
-            const [x, y] = P(...at);
-            return <text key={r.id} x={x} y={y + 3.5} fontSize={10.5} textAnchor="middle" fill="#222">{r.label}</text>;
+          {ed.edges.filter((e) => e.regions.some((r) => ed.activeIds.has(r))).map((e) => {
+            const on = edgeSel.has(e.key), hov = hoverEdges.has(e.key);
+            if (!on && !hov) return null;
+            const [x1, y1] = P(model.vertices[e.a].x, model.vertices[e.a].y);
+            const [x2, y2] = P(model.vertices[e.b].x, model.vertices[e.b].y);
+            return <line key={e.key} x1={x1} y1={y1} x2={x2} y2={y2} stroke={on ? ACCENT : HOVER} strokeWidth={4} strokeLinecap="round" />;
+          })}
+          {handleVertices.map((id) => {
+            const v = model.vertices[id];
+            const [cx, cy] = P(v.x, v.y);
+            const on = vertexSel.has(id), hov = hoverVertex === id;
+            return <circle key={id} cx={cx} cy={cy} r={hov ? 6 : on ? 5 : 3} fill={on ? ACCENT : hov ? HOVER : '#fff'} stroke={ACCENT} strokeWidth={1.5} />;
           })}
         </g>
 
-        {/* 邊 */}
-        {ed.edges.map((e) => {
-          if (mode === 'edge' && !inScope(e.regions)) return null;
-          const a = model.vertices[e.a], b = model.vertices[e.b];
-          const [x1, y1] = P(a.x, a.y), [x2, y2] = P(b.x, b.y);
-          const isSel = mode === 'edge' && sel.has(e.key);
+        {/* 已選區域外框尺寸 */}
+        {selBox && !handlesSelected && (() => {
+          const [x0, y0] = P(selBox.x0, selBox.y0);
+          const [x1, y1] = P(selBox.x1, selBox.y1);
+          const W = selBox.x1 - selBox.x0, H = selBox.y1 - selBox.y0;
           return (
-            <g key={e.key}>
-              {isSel && <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={ACCENT} strokeWidth={4} strokeLinecap="round" pointerEvents="none" />}
-              {mode === 'edge' && (
-                <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="transparent" strokeWidth={12} strokeLinecap="round" className="hit" style={{ cursor: 'move' }} onPointerDown={itemDown(e.key)} />
-              )}
-            </g>
-          );
-        })}
-
-        {/* 頂點：頂點模式顯示範圍內全部；其他模式只顯示會被拖動的 */}
-        {Object.values(model.vertices).map((v) => {
-          if (!((mode === 'vertex' && vertInScope(v.id)) || ed.movingVertices.has(v.id))) return null;
-          const [x, y] = P(v.x, v.y);
-          const on = mode === 'vertex' ? sel.has(v.id) : ed.movingVertices.has(v.id);
-          return (
-            <circle
-              key={v.id}
-              cx={x}
-              cy={y}
-              r={mode === 'vertex' ? 5 : 3.5}
-              fill={on ? ACCENT : '#fff'}
-              stroke={ACCENT}
-              strokeWidth={1.5}
-              className={mode === 'vertex' ? 'hit' : ''}
-              style={{ cursor: mode === 'vertex' ? 'move' : 'default' }}
-              pointerEvents={mode === 'vertex' ? 'auto' : 'none'}
-              onPointerDown={itemDown(v.id)}
-            />
-          );
-        })}
-
-        {/* 已選區域的 W/H 尺寸線 */}
-        {mode === 'region' && ed.selected.length > 0 && (() => {
-          const b = bboxOf(model.regions.filter((r) => sel.has(r.id)).flatMap((r) => polyOf(model, r)));
-          const [x0, y0] = P(b.x0, b.y0), [x1, y1] = P(b.x1, b.y1);
-          return (
-            <g pointerEvents="none" fontSize={10.5} fontFamily="ui-monospace, Menlo, monospace" fill={ACCENT}>
+            <g pointerEvents="none" fontSize={10.5} fontFamily={MONO} fill={ACCENT}>
               <line x1={x0} y1={y1 + 14} x2={x1} y2={y1 + 14} stroke={ACCENT} markerStart="url(#arrS)" markerEnd="url(#arrE)" />
-              <rect x={(x0 + x1) / 2 - 44} y={y1 + 18} width={88} height={14} rx={3} fill="#fff" fillOpacity={0.85} />
-              <text x={(x0 + x1) / 2} y={y1 + 29} textAnchor="middle">W {(b.x1 - b.x0).toFixed(1)} nm</text>
+              <rect x={(x0 + x1) / 2 - 52} y={y1 + 18} width={104} height={14} rx={3} fill="#fff" fillOpacity={0.85} />
+              <text x={(x0 + x1) / 2} y={y1 + 29} textAnchor="middle">W {W} px · {(W * k).toFixed(1)} nm</text>
               <line x1={x1 + 14} y1={y0} x2={x1 + 14} y2={y1} stroke={ACCENT} markerStart="url(#arrS)" markerEnd="url(#arrE)" />
-              <rect x={x1 + 18} y={(y0 + y1) / 2 - 7} width={88} height={14} rx={3} fill="#fff" fillOpacity={0.85} />
-              <text x={x1 + 22} y={(y0 + y1) / 2 + 3.5}>H {(b.y1 - b.y0).toFixed(1)} nm</text>
+              <rect x={x1 + 18} y={(y0 + y1) / 2 - 7} width={104} height={14} rx={3} fill="#fff" fillOpacity={0.85} />
+              <text x={x1 + 22} y={(y0 + y1) / 2 + 3.5}>H {H} px · {(H * k).toFixed(1)} nm</text>
             </g>
           );
         })()}
@@ -290,32 +291,72 @@ export function SectionCanvas({ ed, underlay, outputData, overlayAlpha }: { ed: 
           </marker>
         </defs>
 
-        {/* 框選 */}
         {ed.box && (() => {
-          const [x0, y0] = P(ed.box.x0, ed.box.y0), [x1, y1] = P(ed.box.x1, ed.box.y1);
-          return <rect x={x0} y={y0} width={x1 - x0} height={y1 - y0} stroke={ACCENT} strokeDasharray="4 3" fill="rgba(29,78,216,.08)" pointerEvents="none" />;
+          const [x0, y0] = P(ed.box.x0, ed.box.y0);
+          const [x1, y1] = P(ed.box.x1, ed.box.y1);
+          return <rect x={x0} y={y0} width={x1 - x0} height={y1 - y0} stroke={ACCENT} strokeDasharray="4 3" fill="rgba(31,94,255,.08)" pointerEvents="none" />;
         })()}
 
-        {/* Δ 浮動標籤：nm 與影像 px */}
+        {/* Δ 標籤：px 與 nm */}
         {ed.delta && (() => {
           const d = ed.delta;
           const [cx, cy] = P(d.cur.x, d.cur.y);
           const lines = [
-            `Δx ${signed(d.dx)} nm (${signed(d.dx / nmPerPx)} px)   Δy ${signed(d.dy)} nm (${signed(d.dy / nmPerPx)} px)`,
-            d.normal !== null ? `法向位移 ${signed(d.normal)} nm` : `位移量 ${d.dist.toFixed(1)} nm`,
+            `Δx ${signed(d.dx)} px (${signed(d.dx * k, 1)} nm)   Δy ${signed(d.dy)} px (${signed(d.dy * k, 1)} nm)`,
+            d.normal !== null ? `法向 ${signed(d.normal, 1)} px (${signed(d.normal * k, 1)} nm)` : `位移 ${Math.hypot(d.dx, d.dy).toFixed(1)} px`,
           ];
-          const bw = 300, bh = 40;
+          const bw = 310, bh = 40;
           const x = Math.min(cx + 14, w - bw - 2), y = Math.max(2, cy - bh - 14);
           return (
             <g pointerEvents="none">
               <rect x={x} y={y} width={bw} height={bh} rx={4} fill="#111827" opacity={0.92} />
-              {lines.map((t, i) => (
-                <text key={i} x={x + 8} y={y + 16 + i * 15} fontSize={11.5} fill="#fde68a" fontFamily="ui-monospace, Menlo, monospace">{t}</text>
-              ))}
+              {lines.map((t, i) => <text key={i} x={x + 8} y={y + 16 + i * 15} fontSize={11.5} fill="#fde68a" fontFamily={MONO}>{t}</text>)}
             </g>
           );
         })()}
       </svg>
+
+      {/* 浮動工具列：外框右上 */}
+      {floatPos && !ed.dragging && (
+        <div className="floatbar" style={floatPos} onPointerDown={(e) => e.stopPropagation()}>
+          {handlesSelected ? (
+            <>
+              <span className="dim">{ed.vertexSel.length ? `${ed.vertexSel.length} 頂點` : `${ed.edgeSel.length} 邊`}</span>
+              {ed.edgeSel.length > 0 && (
+                <>
+                  <input type="number" value={normalPx} step={1} onChange={(e) => setNormalPx(+e.target.value)} title="沿法線位移 px" />
+                  <button onClick={() => ed.applyNormalOffset(normalPx)}>法向 {normalPx >= 0 ? '+' : ''}{normalPx} px</button>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="dim">{ed.regionSel.length} 區域</span>
+              <button onClick={() => ed.setMaterial(VOID_ID)}>設為 VOID</button>
+              <button onClick={() => ed.bringToFront()}>移到最上層</button>
+            </>
+          )}
+          <button onClick={() => ed.nudge(0, -1)} title="↑ 1 px">↑</button>
+          <button onClick={() => ed.nudge(0, 1)} title="↓ 1 px">↓</button>
+          <button onClick={() => ed.nudge(-1, 0)} title="← 1 px">←</button>
+          <button onClick={() => ed.nudge(1, 0)} title="→ 1 px">→</button>
+        </div>
+      )}
+
+      {/* 右鍵材質選單 */}
+      {ed.menu && (
+        <div className="ctxmenu" style={{ left: Math.min(w - 190, ed.menu.x), top: Math.min(h - 300, ed.menu.y) }} onPointerDown={(e) => e.stopPropagation()}>
+          <div className="hd">{model.regions.find((r) => r.id === ed.menu!.region)?.label}　→ 材質</div>
+          {ed.materials.map((m) => (
+            <button key={m.id} onClick={() => ed.setMaterial(m.id, ed.regionSel.length ? ed.regionSel : [ed.menu!.region])}>
+              <span className="sw" style={{ background: m.fill }} />
+              {m.name}
+            </button>
+          ))}
+          <div className="sep" />
+          <button onClick={() => ed.bringToFront(ed.regionSel.length ? ed.regionSel : [ed.menu!.region])}>移到最上層</button>
+        </div>
+      )}
     </div>
   );
 }

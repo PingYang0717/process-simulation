@@ -6,10 +6,12 @@ import type { Imported, Material, RasterImage } from '../model/types';
 
 export const VOID_ID = 'void';
 
-/** PNG（RGBA）→ 調色盤 → 連通元件 → 邊界鏈 → 共用頂點的 Model（nm） */
-export function importRaster(img: RasterImage, nmPerPx: number, voidColor = '#000000'): Imported {
+export interface ImportOptions { voidColor?: string; minPx?: number }
+
+/** PNG（RGBA）→ 調色盤 → 連通元件 → 邊界鏈 → 共用頂點的 Model（px） */
+export function importRaster(img: RasterImage, nmPerPx: number, opts: ImportOptions = {}): Imported {
   const { palette, index } = quantize(img);
-  const { labels, count, colorOf } = components(index, img.width, img.height);
+  const { labels, count, colorOf, merged } = components(index, img.width, img.height, opts.minPx ?? 12);
   const materials: Material[] = palette.map((hex, i) => {
     const [r, g, b] = fromHex(hex);
     let best = KNOWN_MATERIALS[0], bd = Infinity;
@@ -20,38 +22,32 @@ export function importRaster(img: RasterImage, nmPerPx: number, voidColor = '#00
     }
     return { id: `m${i}`, name: bd < 900 * 3 ? best.name : `色塊 ${hex}`, fill: hex };
   });
-  materials.push({ id: VOID_ID, name: 'VOID', fill: voidColor, isVoid: true });
+  materials.push({ id: VOID_ID, name: 'VOID', fill: opts.voidColor ?? '#000000', isVoid: true });
   const chains = traceChains(labels, img.width, img.height);
-  const model = chainsToModel(chains, count, colorOf, materials, nmPerPx, img.width, img.height);
+  const { model, exact } = chainsToModel(chains, count, colorOf, materials, img.width, img.height);
   return {
     width: img.width,
     height: img.height,
     original: new Uint8ClampedArray(img.data),
     labels,
+    labelMaterial: colorOf.map((c) => materials[c].id),
     palette,
     materials,
     model,
+    exact,
+    merged,
     nmPerPx,
   };
 }
 
-/** 瀏覽器端把圖檔解碼成 RGBA */
+/** 瀏覽器端把圖檔解碼成 RGBA；關閉色彩管理，像素值與檔案內完全相同 */
 export async function decodeImage(file: Blob): Promise<RasterImage> {
-  const url = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const el = new Image();
-      el.onload = () => resolve(el);
-      el.onerror = reject;
-      el.src = url;
-    });
-    const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    const ctx = canvas.getContext('2d')!;
-    ctx.drawImage(img, 0, 0);
-    return { width: canvas.width, height: canvas.height, data: ctx.getImageData(0, 0, canvas.width, canvas.height).data };
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  const bmp = await createImageBitmap(file, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  const canvas = document.createElement('canvas');
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  const ctx = canvas.getContext('2d', { colorSpace: 'srgb', willReadFrequently: true })!;
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close();
+  return { width: canvas.width, height: canvas.height, data: ctx.getImageData(0, 0, canvas.width, canvas.height).data };
 }

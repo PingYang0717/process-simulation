@@ -1,4 +1,4 @@
-/* 與 prototype v2 相同 */
+/* 與 prototype v3 相同 */
 :root {
     --chrome:#E9EDF2; --panel:#FFFFFF; --canvas:#F7F8FA; --grid:#E2E6EC; --rule:#D8DEE6;
     --ink:#1B2430; --muted:#66727F; --faint:#9AA4B0;
@@ -59,6 +59,16 @@
   .thumb { border:1px solid var(--rule); border-radius:6px; display:block; margin-bottom:6px; background:#fff; }
   .mat.void .sw { background-image:repeating-linear-gradient(45deg,#111 0 2px,#999 2px 5px) !important; }
   .chk { margin-bottom:4px; }
+  .floatbar { position:absolute; display:flex; gap:4px; align-items:center; background:#111827; color:#e5e7eb; border-radius:8px; padding:5px 8px; font-size:12px; box-shadow:0 2px 8px rgba(0,0,0,.25); z-index:4; }
+  .floatbar button { background:#1f2937; color:#e5e7eb; border:1px solid #374151; padding:3px 8px; font-size:12px; } .floatbar button:hover { background:#374151; }
+  .floatbar input { width:52px; font:inherit; font-family:var(--mono); font-size:12px; padding:2px 4px; border-radius:4px; border:1px solid #374151; background:#0b1220; color:#fde68a; }
+  .floatbar .dim { color:#9ca3af; margin-right:4px; }
+  .ctxmenu { position:absolute; background:#fff; border:1px solid var(--rule); border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,.18); padding:6px; z-index:5; min-width:180px; }
+  .ctxmenu .hd { font-size:11.5px; color:var(--muted); padding:4px 8px 6px; } .ctxmenu .sep { border-top:1px solid var(--rule); margin:4px 0; }
+  .ctxmenu button { display:flex; align-items:center; gap:6px; width:100%; text-align:left; border:0; border-radius:6px; padding:5px 8px; font-size:12.5px; }
+  .warn { background:#FEF3C7; color:#92400E; border-radius:6px; padding:6px 8px; font-size:12px; margin:6px 0; }
+  table.acct { margin:6px 0; } table.acct td.up { color:var(--up); } table.acct td.dn { color:var(--dn); }
+  .cell small.sub { display:block; font-size:10px; color:var(--faint); line-height:1.1; }
   .hit:hover { filter:brightness(1.06); }
   @media (prefers-reduced-motion: reduce) { button { transition:none; } }
   @media (max-width: 980px) {
