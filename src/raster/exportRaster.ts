@@ -42,7 +42,7 @@ function uniformShift(model: Model, imp: Imported, region: Region): XY | null {
 }
 
 /**
- * 一段邊 a→b 的實際形狀（不含 b）：沿用原始像素輪廓，每個點的位移由兩端位移沿輪廓長度內插再取整；
+ * 一段邊 a→b 的實際形狀（不含 b）：沿用原始像素輪廓，每個點的位移由兩端位移沿輪廓長度內插（不取整，交給像素中心掃描）；
  * 兩端位移相同時就是整段平移。找不到原始輪廓（新插的頂點）或位移不是整數時用直線。
  * 相鄰區域共用同一段、同一套算法，所以不會留縫；畫面上的輪廓也用它，看到的就是輸出的。
  */
@@ -58,7 +58,7 @@ export function segmentPts(model: Model, imp: Imported, a: string, b: string): X
   const L = along[along.length - 1] || 1;
   return pts.slice(0, -1).map(([x, y], k) => {
     const t = along[k] / L;
-    return [x + Math.round(sa[0] + t * (sb[0] - sa[0])), y + Math.round(sa[1] + t * (sb[1] - sa[1]))];
+    return [x + sa[0] + t * (sb[0] - sa[0]), y + sa[1] + t * (sb[1] - sa[1])];
   });
 }
 
@@ -66,22 +66,33 @@ export function segmentPts(model: Model, imp: Imported, a: string, b: string): X
 export const exactRing = (model: Model, imp: Imported, ring: string[]): XY[] =>
   ring.flatMap((a, i) => segmentPts(model, imp, a, ring[(i + 1) % ring.length]));
 
-/** 像素中心掃描線填色（even-odd，多環），不反鋸齒；hits 記每像素被填幾次 */
+/**
+ * 像素中心掃描線填色（even-odd，多環），不反鋸齒；hits 記每像素被填幾次。
+ * 每條邊只走它跨過的列（像素中心 y + 0.5），點很多的原始輪廓也是線性時間。
+ */
 function fillRings(data: Uint8ClampedArray, hits: Uint8Array, W: number, H: number, rings: XY[][], [r, g, b]: RGB) {
   const bb = bboxOf(rings[0]);
   const y0 = Math.max(0, Math.floor(bb.y0));
   const y1 = Math.min(H - 1, Math.ceil(bb.y1));
-  const xs: number[] = [];
-  for (let y = y0; y <= y1; y++) {
-    const cy = y + 0.5;
-    xs.length = 0;
-    for (const ring of rings) {
-      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-        const [xi, yi] = ring[i];
-        const [xj, yj] = ring[j];
-        if (yi <= cy !== yj <= cy) xs.push(xi + ((cy - yi) * (xj - xi)) / (yj - yi));
+  if (y1 < y0) return;
+  const rows: number[][] = Array.from({ length: y1 - y0 + 1 }, () => []);
+  for (const ring of rings) {
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i];
+      const [xj, yj] = ring[j];
+      if (yi === yj) continue;
+      // 列 y 的中心 cy = y + 0.5 落在 [min, max) 時才算交點，與 (yi <= cy) !== (yj <= cy) 相同
+      const lo = Math.min(yi, yj), hi = Math.max(yi, yj);
+      const from = Math.max(y0, Math.ceil(lo - 0.5)), to = Math.min(y1, Math.ceil(hi - 0.5) - 1);
+      for (let y = from; y <= to; y++) {
+        const cy = y + 0.5;
+        rows[y - y0].push(xi + ((cy - yi) * (xj - xi)) / (yj - yi));
       }
     }
+  }
+  for (let y = y0; y <= y1; y++) {
+    const xs = rows[y - y0];
+    if (xs.length < 2) continue;
     xs.sort((a, c) => a - c);
     for (let k = 0; k + 1 < xs.length; k += 2) {
       const from = Math.max(0, Math.ceil(xs[k] - 0.5));
@@ -161,14 +172,15 @@ export function exportRaster(imp: Imported, model: Model, materials: Material[],
 
   const diffMask = new Uint8Array(W * H);
   const labelMap = new Uint8Array(W * H);
-  const byColor = new Map<number, string>();
-  materials.forEach((m) => {
+  // 每像素只做陣列運算；相鄰像素多半同色，用上一個顏色的結果省掉 Map 查詢
+  const byColor = new Map<number, number>();
+  materials.forEach((m, i) => {
     const [r, g, b] = fromHex(m.fill);
-    byColor.set((r << 16) | (g << 8) | b, m.id);
+    if (!byColor.has((r << 16) | (g << 8) | b)) byColor.set((r << 16) | (g << 8) | b, i);
   });
-  const indexOf = new Map(materials.map((m, i) => [m.id, i]));
-  const before = new Map<string, number>(), after = new Map<string, number>();
-  let diffPx = 0, overlapPx = 0, foreign = 0;
+  const perLabel = new Int32Array(imp.labelMaterial.length);
+  const after = new Int32Array(materials.length);
+  let diffPx = 0, overlapPx = 0, foreign = 0, lastColor = -1, lastIndex = -1;
   for (let i = 0; i < W * H; i++) {
     const p = i * 4;
     if (out[p] !== original[p] || out[p + 1] !== original[p + 1] || out[p + 2] !== original[p + 2]) {
@@ -176,21 +188,26 @@ export function exportRaster(imp: Imported, model: Model, materials: Material[],
       diffPx++;
     }
     if (hits[i] > 1) overlapPx++;
-    const m0 = imp.labelMaterial[labels[i]];
-    before.set(m0, (before.get(m0) ?? 0) + 1);
-    const m1 = byColor.get((out[p] << 16) | (out[p + 1] << 8) | out[p + 2]);
-    if (m1 === undefined) {
+    perLabel[labels[i]]++;
+    const c = (out[p] << 16) | (out[p + 1] << 8) | out[p + 2];
+    if (c !== lastColor) {
+      lastColor = c;
+      lastIndex = byColor.get(c) ?? -1;
+    }
+    if (lastIndex < 0) {
       foreign++;
       labelMap[i] = 255;
     } else {
-      after.set(m1, (after.get(m1) ?? 0) + 1);
-      labelMap[i] = indexOf.get(m1)!;
+      after[lastIndex]++;
+      labelMap[i] = lastIndex;
     }
   }
+  const before = new Map<string, number>();
+  perLabel.forEach((n, l) => before.set(imp.labelMaterial[l], (before.get(imp.labelMaterial[l]) ?? 0) + n));
   if (foreign) warnings.push(`${foreign} 個像素的顏色不在調色盤內`);
   if (overlapPx) warnings.push(`${overlapPx} 個像素被兩個區域重疊覆蓋（依順序取後者）`);
   const byMaterial = materials
-    .map((m) => ({ id: m.id, name: m.name, before: before.get(m.id) ?? 0, after: after.get(m.id) ?? 0 }))
+    .map((m, i) => ({ id: m.id, name: m.name, before: before.get(m.id) ?? 0, after: after[i] }))
     .filter((t) => t.before || t.after);
   return { data: out, changed: changed.map((r) => r.id), diffPx, diffMask, overlapPx, byMaterial, warnings, labelMap, modes };
 }

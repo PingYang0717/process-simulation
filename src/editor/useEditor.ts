@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { hasHandle, outwardShifts, propagateLayers, smoothEdgeGroup, violates } from '../model/drag';
+import { falloffWeights, hasHandle, outwardShifts, propagateLayers, smoothEdgeGroup, violates } from '../model/drag';
 import { bboxOf, edgeFrame, edgeKey, edgesOf, pointInPoly, polyOf, ringsOf } from '../model/geometry';
 import { clampToWorld, detachRegions, insertVertexOnEdge, moveVertices } from '../model/ops';
 import type { CutId, CutState, Edge, Imported, Model, XY } from '../model/types';
@@ -39,7 +39,7 @@ export type Hit =
   | { kind: 'edge'; key: string; region: string; group: string[] }
   | { kind: 'region'; id: string };
 type Gesture =
-  | { kind: 'move'; startModel: Model; start: Pt; cur: Pt; vertexIds: string[]; regionIds: string[]; detach: boolean; moved: boolean; edgeN?: XY; base?: Model }
+  | { kind: 'move'; startModel: Model; start: Pt; cur: Pt; vertexIds: string[]; regionIds: string[]; detach: boolean; moved: boolean; edgeN?: XY; base?: Model; falloff?: boolean }
   | { kind: 'box'; start: Pt; cur: Pt; additive: boolean };
 
 const ringVertices = (model: Model, ids: string[]) => {
@@ -237,11 +237,14 @@ export function useEditor() {
   }, []);
 
   /**
-   * 位移規則：整塊搬動直接套；連帶開時襯層跟著走；
-   * 連帶關時逐步縮小位移直到不穿層。
+   * 位移規則：整塊搬動直接套；連帶開時襯層跟著走；連帶關時逐步縮小位移直到不穿層。
+   * weights：柔性拖點時各頂點跟著動的比例（沒給 = 全部 1）。
    */
-  const resolveDisp = useCallback((m: Model, ids: string[], d: XY, detach: boolean) => {
-    const uniform = (v: XY) => new Map(ids.map((id) => [id, v] as [string, XY]));
+  const resolveDisp = useCallback((m: Model, ids: string[], d: XY, detach: boolean, weights?: Map<string, number>) => {
+    const uniform = ([dx, dy]: XY) =>
+      weights
+        ? new Map([...weights].map(([id, k]) => [id, [Math.round(dx * k), Math.round(dy * k)]] as [string, XY]))
+        : new Map(ids.map((id) => [id, [dx, dy]] as [string, XY]));
     if (detach) return { disp: uniform(d), layers: 0, blocked: false };
     if (followRef.current) {
       const p = propagateLayers(m, uniform(d));
@@ -327,7 +330,7 @@ export function useEditor() {
     setVertexSel(next);
     setEdgeSel([]);
     if (mods.ctrl) return;
-    startMove({ start: at, vertexIds: next, regionIds: scope, detach: false });
+    startMove({ start: at, vertexIds: next, regionIds: scope, detach: false, falloff: true });
   }, [hitTest, clearSel, startMove, edgeByKey, commit, expandMirror]);
 
   const pointerMove = useCallback((at: Pt) => {
@@ -346,7 +349,10 @@ export function useEditor() {
     // 區域整塊拖：第一次移動才分離共用頂點，只點不拖不改模型
     const base = g.base ?? (g.detach ? detachRegions(g.startModel, g.regionIds) : g.startModel);
     const ids = g.detach ? ringVertices(base, g.regionIds) : g.vertexIds;
-    const { disp, layers, blocked } = resolveDisp(base, ids, d, g.detach);
+    // 拖頂點：附近的點依弧長按比例跟著走（半徑隨拖拉距離放大）；按住 Shift 只動這一點
+    const radius = Math.max(6, 2.5 * Math.hypot(d[0], d[1]));
+    const weights = g.falloff && !shiftRef.current ? falloffWeights(base, ids, radius) : undefined;
+    const { disp, layers, blocked } = resolveDisp(base, ids, d, g.detach, weights);
     setFollowInfo({ layers, blocked });
     const next = { ...g, base, cur: at, moved: true };
     gestureRef.current = next;

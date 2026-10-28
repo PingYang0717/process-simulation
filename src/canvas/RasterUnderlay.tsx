@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { Imported } from '../model/types';
 import type { View } from '../editor/view';
 
-export type Underlay = 'original' | 'output' | 'none';
+/** compare：分割線左邊原圖、右邊輸出 */
+export type Underlay = 'output' | 'original' | 'compare' | 'none';
 
 const toCanvas = (cache: { current: HTMLCanvasElement | null }, img: ImageData) => {
   cache.current ??= document.createElement('canvas');
@@ -13,33 +14,60 @@ const toCanvas = (cache: { current: HTMLCanvasElement | null }, img: ImageData) 
   return c;
 };
 
-/** 底圖：原圖或輸出結果，加上相異像素紅色疊圖；依 view 變換、不平滑（放大看得到像素） */
-export function RasterUnderlay({ imported, output, diffMask, showDiff, underlay, view, w, h }: {
-  imported: Imported; output: Uint8ClampedArray; diffMask: Uint8Array; showDiff: boolean; underlay: Underlay; view: View; w: number; h: number;
+/** 相異區域的外框：遮罩內像素與遮罩外相鄰的那條像素邊（影像座標） */
+function diffOutline(mask: Uint8Array, W: number, H: number): Path2D | null {
+  const path = new Path2D();
+  let any = false;
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      if (!mask[y * W + x]) continue;
+      any = true;
+      if (y === 0 || !mask[(y - 1) * W + x]) { path.moveTo(x, y); path.lineTo(x + 1, y); }
+      if (y === H - 1 || !mask[(y + 1) * W + x]) { path.moveTo(x, y + 1); path.lineTo(x + 1, y + 1); }
+      if (x === 0 || !mask[y * W + x - 1]) { path.moveTo(x, y); path.lineTo(x, y + 1); }
+      if (x === W - 1 || !mask[y * W + x + 1]) { path.moveTo(x + 1, y); path.lineTo(x + 1, y + 1); }
+    }
+  return any ? path : null;
+}
+
+/**
+ * 底圖：輸出（預設，顏色就是材質色）、原圖、前後比對（split 為分割線的螢幕 x）或無；
+ * 相異像素畫成紅色外框，不蓋住顏色。依 view 變換、不平滑（放大看得到像素）。
+ */
+export function RasterUnderlay({ imported, output, diffMask, showDiff, underlay, split, view, w, h }: {
+  imported: Imported; output: Uint8ClampedArray; diffMask: Uint8Array; showDiff: boolean; underlay: Underlay; split: number; view: View; w: number; h: number;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const base = useRef<HTMLCanvasElement | null>(null);
-  const diff = useRef<HTMLCanvasElement | null>(null);
+  const outC = useRef<HTMLCanvasElement | null>(null);
+  const origC = useRef<HTMLCanvasElement | null>(null);
+  const { width: W, height: H } = imported;
+  const outline = useMemo(() => (showDiff ? diffOutline(diffMask, W, H) : null), [diffMask, showDiff, W, H]);
+  const outImg = useMemo(() => toCanvas(outC, new ImageData(new Uint8ClampedArray(output), W, H)), [output, W, H]);
+  const origImg = useMemo(() => toCanvas(origC, new ImageData(new Uint8ClampedArray(imported.original), W, H)), [imported, W, H]);
   useEffect(() => {
     const ctx = ref.current?.getContext('2d');
     if (!ctx) return;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    const { width: W, height: H } = imported;
     ctx.imageSmoothingEnabled = false;
     ctx.setTransform(view.s, 0, 0, view.s, view.tx, view.ty);
-    if (underlay !== 'none') {
-      const data = underlay === 'output' ? output : imported.original;
-      ctx.drawImage(toCanvas(base, new ImageData(new Uint8ClampedArray(data), W, H)), 0, 0);
+    if (underlay === 'output' || underlay === 'compare') ctx.drawImage(outImg, 0, 0);
+    if (underlay === 'original') ctx.drawImage(origImg, 0, 0);
+    if (underlay === 'compare') {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.beginPath();
+      ctx.rect(0, 0, split, h);
+      ctx.clip();
+      ctx.setTransform(view.s, 0, 0, view.s, view.tx, view.ty);
+      ctx.drawImage(origImg, 0, 0);
+      ctx.restore();
     }
-    if (showDiff && diffMask.some((v) => v)) {
-      const img = new ImageData(W, H);
-      for (let i = 0; i < W * H; i++) {
-        if (!diffMask[i]) continue;
-        img.data[i * 4] = 226; img.data[i * 4 + 1] = 75; img.data[i * 4 + 2] = 74; img.data[i * 4 + 3] = 170;
-      }
-      ctx.drawImage(toCanvas(diff, img), 0, 0);
+    if (outline) {
+      ctx.strokeStyle = '#E24B4A';
+      ctx.lineWidth = Math.max(1.5, view.s * 0.12) / view.s;
+      ctx.stroke(outline);
     }
-  }, [underlay, output, diffMask, showDiff, imported, view, w, h]);
+  }, [underlay, outImg, origImg, outline, split, view, w, h]);
   return <canvas ref={ref} width={w} height={h} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />;
 }

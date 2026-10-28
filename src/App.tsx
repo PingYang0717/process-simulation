@@ -13,19 +13,20 @@ const HOLD = { V: '頂點', E: '邊', R: '區域' } as const;
 
 export function App() {
   const ed = useEditor();
-  const [underlay, setUnderlay] = useState<Underlay>('original');
+  const [underlay, setUnderlay] = useState<Underlay>('output');
   const [alpha, setAlpha] = useState(0.3);
   const [showDiff, setShowDiff] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
   const [backfill, setBackfill] = useState(VOID_ID);
   const last = useRef<ExportResult | null>(null);
-  // 拖拉中沿用上一次的輸出，放開才重算
+  // 拖拉中即時重算（約 20 ms / 640×360）；超過 1M 像素的大圖才沿用上一次，放開再算
+  const big = ed.imported.width * ed.imported.height > 1_000_000;
   const result = useMemo(() => {
-    if (ed.dragging && last.current && last.current.data.length === ed.imported.original.length) return last.current;
+    if (big && ed.dragging && last.current && last.current.data.length === ed.imported.original.length) return last.current;
     const r = exportRaster(ed.imported, ed.model, ed.materials, backfill);
     last.current = r;
     return r;
-  }, [ed.imported, ed.model, ed.materials, backfill, ed.dragging]);
+  }, [ed.imported, ed.model, ed.materials, backfill, big && ed.dragging]);
   const cut = CUTS.find((c) => c.id === ed.cut)!;
   const h = ed.hover;
   const labelOf = (id: string) => ed.model.regions.find((r) => r.id === id)?.label;

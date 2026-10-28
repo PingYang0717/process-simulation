@@ -46,6 +46,8 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 600, h: 500 });
   const [pushPx, setPushPx] = useState(2);
+  const [split, setSplit] = useState(0.5); // 前後比對分割線位置（畫布寬度比例）
+  const [peek, setPeek] = useState(false); // 按住 B 暫時看原圖
   const pan = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
   const spaceDown = useRef(false);
 
@@ -76,12 +78,17 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !(e.target as HTMLElement | null)?.matches?.('input,select,textarea')) {
+      if ((e.target as HTMLElement | null)?.matches?.('input,select,textarea')) return;
+      if (e.code === 'Space') {
         spaceDown.current = true;
         e.preventDefault();
       }
+      if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey) setPeek(true);
     };
-    const up = (e: KeyboardEvent) => { if (e.code === 'Space') spaceDown.current = false; };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === 'Space') spaceDown.current = false;
+      if (e.key.toLowerCase() === 'b') setPeek(false);
+    };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
     return () => {
@@ -188,7 +195,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
 
   return (
     <div ref={wrapRef} className="canvas-wrap" style={{ cursor }}>
-      <RasterUnderlay imported={ed.imported} output={result.data} diffMask={result.diffMask} showDiff={showDiff} underlay={underlay} view={view} w={w} h={h} />
+      <RasterUnderlay imported={ed.imported} output={result.data} diffMask={result.diffMask} showDiff={showDiff} underlay={peek ? 'original' : underlay} split={split * w} view={view} w={w} h={h} />
       <svg
         ref={svgRef}
         width={w}
@@ -329,6 +336,26 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
           );
         })()}
       </svg>
+
+      {underlay === 'compare' && !peek && (
+        <div
+          className="split"
+          style={{ left: split * w }}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            (e.target as HTMLElement).setPointerCapture(e.pointerId);
+          }}
+          onPointerMove={(e) => {
+            if (!(e.target as HTMLElement).hasPointerCapture(e.pointerId)) return;
+            const r = wrapRef.current!.getBoundingClientRect();
+            setSplit(Math.min(0.98, Math.max(0.02, (e.clientX - r.left) / r.width)));
+          }}
+        >
+          <span className="tag l">原圖</span>
+          <span className="tag r">輸出</span>
+        </div>
+      )}
+      {peek && <div className="peek">原圖（放開 B 回到輸出）</div>}
 
       {/* 浮動工具列：外框右上 */}
       {floatPos && !ed.dragging && (

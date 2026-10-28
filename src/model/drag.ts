@@ -215,3 +215,37 @@ export function outwardShifts(model: Model, owner: Region, keys: Set<string>, d:
   }
   return out;
 }
+
+/**
+ * 柔性拖點：沿輪廓往兩側走，弧長 s < radius 的頂點權重 0.5·(1 + cos(π·s / radius))；
+ * 碰到角、或下一段會跨出半徑的頂點就停（它們不動）。
+ * 只拖單一點時鄰點不動，像素階梯會被拉成鋸齒；讓附近的點按比例跟著走，輪廓就保持順。
+ */
+export function falloffWeights(model: Model, seeds: string[], radius: number): Map<string, number> {
+  const w = new Map<string, number>();
+  const put = (id: string, v: number) => { if (v > (w.get(id) ?? 0)) w.set(id, v); };
+  for (const seed of seeds) {
+    put(seed, 1);
+    for (const r of model.regions)
+      for (const ring of ringsOf(r)) {
+        const i0 = ring.indexOf(seed);
+        if (i0 < 0) continue;
+        const n = ring.length;
+        for (const step of [1, -1]) {
+          let s = 0, k = i0;
+          for (let c = 0; c < n - 1; c++) {
+            const prev = model.vertices[ring[k]];
+            k = (k + step + n) % n;
+            const q = model.vertices[ring[k]];
+            s += Math.hypot(q.x - prev.x, q.y - prev.y);
+            if (s >= radius || k === i0 || isCorner(model, ring, k)) break;
+            // 下一段長到跨出半徑（例如接上長直邊）也當錨點，不然整條直邊會被拉斜
+            const after = model.vertices[ring[(k + step + n) % n]];
+            if (s + Math.hypot(after.x - q.x, after.y - q.y) > radius) break;
+            put(ring[k], 0.5 * (1 + Math.cos((Math.PI * s) / radius)));
+          }
+        }
+      }
+  }
+  return w;
+}

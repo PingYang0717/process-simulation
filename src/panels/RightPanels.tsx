@@ -19,15 +19,16 @@ export function ViewPanel({ ed, d }: { ed: Editor; d: Display }) {
   return (
     <Section title="顯示">
       <div className="seg">
-        {([['original', '原圖'], ['output', '輸出'], ['none', '無底圖']] as [Underlay, string][]).map(([k, label]) => (
+        {([['output', '輸出'], ['original', '原圖'], ['compare', '前後比對'], ['none', '無底圖']] as [Underlay, string][]).map(([k, label]) => (
           <button key={k} className={d.underlay === k ? 'on' : ''} onClick={() => d.setUnderlay(k)}>{label}</button>
         ))}
       </div>
       <div className="row" style={{ marginTop: 6 }}>
-        <label className="chk"><input type="checkbox" checked={d.showDiff} onChange={(e) => d.setShowDiff(e.target.checked)} /> 相異像素標紅</label>
+        <label className="chk"><input type="checkbox" checked={d.showDiff} onChange={(e) => d.setShowDiff(e.target.checked)} /> 改過的地方框紅線</label>
         <label className="chk"><input type="checkbox" checked={d.showLabels} onChange={(e) => d.setShowLabels(e.target.checked)} /> 區域名稱</label>
         <label className="chk"><input type="checkbox" checked={ed.mirror} onChange={(e) => ed.setMirror(e.target.checked)} /> 多區域同步對應</label>
       </div>
+      <small className="dim">前後比對：拖中間的線；任何時候按住 B 暫時看原圖。</small>
       <label className="chk">
         <input type="checkbox" checked={ed.follow} onChange={(e) => ed.setFollow(e.target.checked)} /> 拖邊時外層襯層一起推（關閉＝擋在 1 px，不穿層）
       </label>
