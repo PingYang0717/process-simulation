@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { isCorner, propagateLayers, smoothEdgeGroup, violates } from '../model/drag';
+import { hasHandle, outwardShifts, propagateLayers, smoothEdgeGroup, violates } from '../model/drag';
 import { bboxOf, edgeFrame, edgeKey, edgesOf, pointInPoly, polyOf, ringsOf } from '../model/geometry';
 import { clampToWorld, detachRegions, insertVertexOnEdge, moveVertices } from '../model/ops';
 import type { CutId, CutState, Edge, Imported, Model, XY } from '../model/types';
@@ -72,6 +72,8 @@ export function useEditor() {
   const [regionSel, setRegionSel] = useState<string[]>([]);
   const [edgeSel, setEdgeSel] = useState<string[]>([]);
   const [vertexSel, setVertexSel] = useState<string[]>([]);
+  /** 選邊時點的是哪個區域：「往外推」= 遠離它 */
+  const [edgeOwner, setEdgeOwner] = useState<string | null>(null);
   const [hover, setHover] = useState<Hit>({ kind: 'none' });
   const [hold, setHold] = useState<Hold>(null);
   const [shiftHeld, setShiftHeld] = useState(false);
@@ -93,6 +95,7 @@ export function useEditor() {
   const regionSelRef = useRef(regionSel); regionSelRef.current = regionSel;
   const edgeSelRef = useRef(edgeSel); edgeSelRef.current = edgeSel;
   const vertexSelRef = useRef(vertexSel); vertexSelRef.current = vertexSel;
+  const edgeOwnerRef = useRef(edgeOwner); edgeOwnerRef.current = edgeOwner;
   const viewRef = useRef(view); viewRef.current = view;
   const canvasRef = useRef(canvas); canvasRef.current = canvas;
   const holdRef = useRef(hold); holdRef.current = hold;
@@ -188,7 +191,7 @@ export function useEditor() {
             const v = m.vertices[ring[i]];
             const d = d2(v.x, v.y);
             if (d > SNAP_VERTEX ** 2 || (best && d >= best.d)) continue;
-            if (h !== 'V' && !isCorner(m, ring, i)) continue;
+            if (h !== 'V' && !hasHandle(m, ring, i, s)) continue;
             best = { id: ring[i], region: r.id, d };
           }
       }
@@ -208,6 +211,14 @@ export function useEditor() {
           }
       }
       if (best) {
+        // 共用邊兩側都在範圍內時，算在游標所在那一側（「往外推」= 遠離它）
+        const { a, b } = best;
+        const side = m.regions.find((r) =>
+          scope.has(r.id) &&
+          ringsOf(r).some((ring) => ring.some((v, i) => { const w = ring[(i + 1) % ring.length]; return (v === a && w === b) || (v === b && w === a); })) &&
+          pointInPoly([at.x, at.y], polyOf(m, r)),
+        );
+        if (side) best.region = side.id;
         const region = m.regions.find((r) => r.id === best.region)!;
         const group = shiftRef.current ? [edgeKey(best.a, best.b)] : smoothEdgeGroup(m, region, best.a, best.b);
         return { kind: 'edge', key: edgeKey(best.a, best.b), region: best.region, group };
@@ -298,10 +309,12 @@ export function useEditor() {
       else if (mods.shift) next = [...new Set([...cur, ...items])];
       else next = all ? cur : items;
       setEdgeSel(next);
+      setEdgeOwner(hit.region);
       setVertexSel([]);
       if (mods.ctrl) return;
       const e = edgeByKey.get(hit.key);
-      const edgeN = e && next.length === hit.group.length ? edgeFrame(m, e).n : undefined;
+      // 只有單一小段時「往外」才有意義（整段平滑邊各處方向不同）
+      const edgeN = e && hit.group.length === 1 && next.length === 1 ? edgeFrame(m, e, hit.region).n : undefined;
       startMove({ start: at, vertexIds: edgeGroupVertices(next), regionIds: scope, detach: false, edgeN });
       return;
     }
@@ -390,24 +403,51 @@ export function useEditor() {
     commit(clampToWorld(moveVertices(base, disp)));
   }, [commit, resolveDisp]);
 
-  /** 每條已選邊沿自己的法向位移 d px；共用頂點取平均 */
-  const applyNormalOffset = useCallback((d: number) => {
+  /**
+   * 往外推 d px（負值往內）：已選邊沿平滑後的法線、遠離點選時的區域移動；
+   * 對應到其他區域的邊各自以所屬的已選區域為準。連帶開時外層襯層一起推，與拖拉相同。
+   */
+  const pushOutward = useCallback((d: number) => {
     const m = modelRef.current;
-    const acc = new Map<string, XY[]>();
-    for (const k of edgeSelRef.current) {
+    const keys = edgeSelRef.current;
+    const byOwner = new Map<string, Set<string>>();
+    for (const k of keys) {
       const e = edgeByKey.get(k);
       if (!e) continue;
-      const { n } = edgeFrame(m, e);
-      for (const v of [e.a, e.b]) {
-        if (!acc.has(v)) acc.set(v, []);
-        acc.get(v)!.push([n[0] * d, n[1] * d]);
-      }
+      const owner = e.regions.find((r) => r === edgeOwnerRef.current) ?? e.regions.find((r) => regionSelRef.current.includes(r)) ?? e.regions[0];
+      if (!byOwner.has(owner)) byOwner.set(owner, new Set());
+      byOwner.get(owner)!.add(k);
     }
-    if (!acc.size) return;
     const delta = new Map<string, XY>();
-    acc.forEach((list, v) => delta.set(v, [list.reduce((s, p) => s + p[0], 0) / list.length, list.reduce((s, p) => s + p[1], 0) / list.length]));
-    commit(clampToWorld(moveVertices(m, delta)));
+    byOwner.forEach((set, id) => {
+      const r = m.regions.find((x) => x.id === id);
+      if (r) outwardShifts(m, r, set, d).forEach((v, k) => delta.set(k, v));
+    });
+    if (!delta.size) return;
+    const { disp, layers } = followRef.current ? propagateLayers(m, delta, 3, 16, 2.5, true) : { disp: delta, layers: [] as string[] };
+    setFollowInfo({ layers: layers.length, blocked: false });
+    commit(clampToWorld(moveVertices(m, disp)));
   }, [commit, edgeByKey]);
+
+  /** 改材質名稱；區域名稱「舊名 n」一併改成「新名 n」（含歷史，Undo 後名稱不會跳回去） */
+  const renameMaterial = useCallback((id: string, name: string) => {
+    const old = importedRef.current.materials.find((x) => x.id === id)?.name;
+    if (!old || !name.trim() || name === old) return;
+    const relabel = (m: Model): Model => ({
+      ...m,
+      regions: m.regions.map((r) => (r.label.startsWith(old + ' ') ? { ...r, label: name + r.label.slice(old.length) } : r)),
+    });
+    const imp = importedRef.current;
+    const next = { ...imp, materials: imp.materials.map((x) => (x.id === id ? { ...x, name } : x)), model: relabel(imp.model) };
+    modelRef.current = relabel(modelRef.current);
+    patch((s) => ({
+      imported: next,
+      model: modelRef.current,
+      history: s.history.map(relabel),
+      future: s.future.map(relabel),
+      baseline: s.baseline && { ...s.baseline, model: relabel(s.baseline.model) },
+    }));
+  }, [patch]);
 
   const setMaterial = useCallback((material: string, ids?: string[]) => {
     const sel = ids ?? regionSelRef.current;
@@ -541,14 +581,14 @@ export function useEditor() {
 
   return {
     cut, setCut, imported, loadImage, setNmPerPx, nmPerPx: imported.nmPerPx, materials, model, edges, edgeByKey,
-    regionSel, edgeSel, vertexSel, hover, hold, activeIds,
+    regionSel, edgeSel, vertexSel, edgeOwner, hover, hold, activeIds,
     mirror, setMirror, follow, setFollow, followInfo,
     history, future, baseline, pinBaseline, clearBaseline,
     delta, box, dragging: gesture?.kind === 'move' && gesture.moved,
     view, setView, canvas, setCanvasSize, fit, zoomAt, setZoom, panBy, panMode, setPanMode,
     menu, setMenu, openMenu,
     pointerDown, pointerMove, hitTest,
-    nudge, applyNormalOffset, setMaterial, selectByMaterial, selectAll, clearSel, bringToFront,
+    nudge, pushOutward, renameMaterial, setMaterial, selectByMaterial, selectAll, clearSel, bringToFront,
     undo, redo, reset,
   };
 }

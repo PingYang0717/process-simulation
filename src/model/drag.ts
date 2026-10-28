@@ -1,4 +1,4 @@
-import { edgeKey, ringsOf, segDist } from './geometry';
+import { edgeKey, pointInPoly, ringsOf, segDist } from './geometry';
 import type { Model, Region, XY } from './types';
 
 /**
@@ -25,6 +25,20 @@ export function isCorner(model: Model, ring: string[], i: number, minDeg = 50, w
   const la = Math.hypot(a[0], a[1]) || 1, lb = Math.hypot(b[0], b[1]) || 1;
   const cos = Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1]) / (la * lb)));
   return (Math.acos(cos) * 180) / Math.PI >= minDeg;
+}
+
+/**
+ * 頂點把手：角永遠有；其他頂點在放大到與前後鄰點都相距 ≥ minGap 螢幕 px 時才有
+ * （縮小時像素階梯的頂點擠在一起，抓不準，留給「推平滑邊」）。
+ */
+export function hasHandle(model: Model, ring: string[], i: number, scale: number, minGap = 14): boolean {
+  if (isCorner(model, ring, i)) return true;
+  const n = ring.length;
+  const p = model.vertices[ring[i]];
+  return [ring[(i - 1 + n) % n], ring[(i + 1) % n]].every((id) => {
+    const q = model.vertices[id];
+    return Math.hypot(q.x - p.x, q.y - p.y) * scale >= minGap;
+  });
 }
 
 /** 平滑邊：從 a–b 沿環往兩側走到「角」為止，回傳整段的 edgeKey */
@@ -77,7 +91,11 @@ function nearestMoved(model: Model, edges: [string, string][], disp: Map<string,
  * 且最大最小差 ≤ tol，視為均勻薄層，每個頂點取最近已移動頂點的位移（超過一層厚度則不動）。
  * 新移動的頂點成為下一層的種子，最多 maxLayers 層。落在被拖邊上（距離 < 0.5）的頂點不列入厚度統計。
  */
-export function propagateLayers(model: Model, seed: Map<string, XY>, maxLayers = 3, maxThick = 16, tol = 2.5): { disp: Map<string, XY>; layers: string[] } {
+export function propagateLayers(
+  model: Model, seed: Map<string, XY>, maxLayers = 3, maxThick = 16, tol = 2.5,
+  /** true：取移動邊上最近點的內插位移（往外推用，等同保形偏移）；false：取最近已移動頂點的位移（拖拉用） */
+  interp = false,
+): { disp: Map<string, XY>; layers: string[] } {
   const disp = new Map(seed);
   let front = new Set(seed.keys());
   const layers: string[] = [];
@@ -101,6 +119,16 @@ export function propagateLayers(model: Model, seed: Map<string, XY>, maxLayers =
       if (hi > maxThick || hi - lo > tol) continue;
       rest.forEach((v) => {
         const p = model.vertices[v];
+        if (interp) {
+          // 只看兩端都已移動的邊：一端沒動的邊（例如底部接面）在端點處位移為 0，會把頂點釘住
+          const hit = nearestMoved(model, edges.filter(([a, b]) => disp.has(a) && disp.has(b)), disp, [p.x, p.y]);
+          const bv: XY = [Math.round(hit.v[0]), Math.round(hit.v[1])];
+          if (hit.d <= maxThick + tol && (bv[0] || bv[1])) {
+            disp.set(v, bv);
+            next.add(v);
+          }
+          return;
+        }
         let bd = Infinity, bv: XY = [0, 0];
         front.forEach((s) => {
           const q = model.vertices[s];
@@ -147,4 +175,43 @@ export function violates(model: Model, disp: Map<string, XY>, gap = 1): boolean 
     }
   }
   return false;
+}
+
+const inRegion = (model: Model, r: Region, p: XY) =>
+  ringsOf(r).reduce((inside, ring) => (pointInPoly(p, ring.map((v): XY => [model.vertices[v].x, model.vertices[v].y])) ? !inside : inside), false);
+
+/**
+ * 往外推：已選邊（edgeKey）上每個頂點沿「平滑後的法線」遠離 owner 區域移 d px，取整數。
+ * 法線取自沿已選邊往前後各走約 walk px 的弦，所以像素階梯不會讓方向亂跳；
+ * 端點只看已選那一側，矩形或 fin 底部的角會水平移、不會斜著鑽進基板。
+ */
+export function outwardShifts(model: Model, owner: Region, keys: Set<string>, d: number, walk = 6): Map<string, XY> {
+  const out = new Map<string, XY>();
+  for (const ring of ringsOf(owner)) {
+    const n = ring.length;
+    const sel = (i: number) => keys.has(edgeKey(ring[i], ring[(i + 1) % n])); // 邊 i → i+1
+    for (let i = 0; i < n; i++) {
+      if (!sel(i) && !sel((i - 1 + n) % n)) continue;
+      const p = model.vertices[ring[i]];
+      const reach = (step: 1 | -1): XY => {
+        let len = 0, k = i, x = p.x, y = p.y;
+        for (let s = 0; s < n - 1 && len < walk; s++) {
+          if (!sel(step === 1 ? k : (k - 1 + n) % n)) break;
+          k = (k + step + n) % n;
+          const q = model.vertices[ring[k]];
+          len += Math.hypot(q.x - x, q.y - y);
+          x = q.x;
+          y = q.y;
+        }
+        return [x, y];
+      };
+      const a = reach(-1), b = reach(1);
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (!L) continue;
+      let nx = -(b[1] - a[1]) / L, ny = (b[0] - a[0]) / L;
+      if (inRegion(model, owner, [p.x + nx * 0.75, p.y + ny * 0.75])) { nx = -nx; ny = -ny; }
+      out.set(ring[i], [Math.round(nx * d), Math.round(ny * d)]);
+    }
+  }
+  return out;
 }

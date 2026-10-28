@@ -41,21 +41,30 @@ function uniformShift(model: Model, imp: Imported, region: Region): XY | null {
   return shift;
 }
 
-/** 環 → 輸出用的點列：兩端位移相同的段整段平移原始像素輪廓，其餘用直線 */
-function exactRing(model: Model, imp: Imported, ring: string[]): XY[] {
-  const out: XY[] = [];
-  for (let i = 0; i < ring.length; i++) {
-    const a = ring[i], b = ring[(i + 1) % ring.length];
-    const va = model.vertices[a], vb = model.vertices[b];
-    const seg = imp.exact.get(edgeKey(va.src ?? a, vb.src ?? b));
-    const sa = shiftOf(model, imp, a), sb = shiftOf(model, imp, b);
-    if (seg && sa && sb && sa[0] === sb[0] && sa[1] === sb[1]) {
-      const pts = seg.from === (va.src ?? a) ? seg.pts : [...seg.pts].reverse();
-      for (let k = 0; k < pts.length - 1; k++) out.push([pts[k][0] + sa[0], pts[k][1] + sa[1]]);
-    } else out.push([va.x, va.y]);
-  }
-  return out;
+/**
+ * 一段邊 a→b 的實際形狀（不含 b）：沿用原始像素輪廓，每個點的位移由兩端位移沿輪廓長度內插再取整；
+ * 兩端位移相同時就是整段平移。找不到原始輪廓（新插的頂點）或位移不是整數時用直線。
+ * 相鄰區域共用同一段、同一套算法，所以不會留縫；畫面上的輪廓也用它，看到的就是輸出的。
+ */
+export function segmentPts(model: Model, imp: Imported, a: string, b: string): XY[] {
+  const va = model.vertices[a], vb = model.vertices[b];
+  const seg = imp.exact.get(edgeKey(va.src ?? a, vb.src ?? b));
+  const sa = shiftOf(model, imp, a), sb = shiftOf(model, imp, b);
+  if (!seg || !sa || !sb) return [[va.x, va.y]];
+  const pts = seg.from === (va.src ?? a) ? seg.pts : [...seg.pts].reverse();
+  if (sa[0] === sb[0] && sa[1] === sb[1]) return pts.slice(0, -1).map(([x, y]) => [x + sa[0], y + sa[1]]);
+  const along = [0];
+  for (let k = 1; k < pts.length; k++) along.push(along[k - 1] + Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
+  const L = along[along.length - 1] || 1;
+  return pts.slice(0, -1).map(([x, y], k) => {
+    const t = along[k] / L;
+    return [x + Math.round(sa[0] + t * (sb[0] - sa[0])), y + Math.round(sa[1] + t * (sb[1] - sa[1]))];
+  });
 }
+
+/** 環 → 輸出用的點列 */
+export const exactRing = (model: Model, imp: Imported, ring: string[]): XY[] =>
+  ring.flatMap((a, i) => segmentPts(model, imp, a, ring[(i + 1) % ring.length]));
 
 /** 像素中心掃描線填色（even-odd，多環），不反鋸齒；hits 記每像素被填幾次 */
 function fillRings(data: Uint8ClampedArray, hits: Uint8Array, W: number, H: number, rings: XY[][], [r, g, b]: RGB) {
@@ -106,7 +115,7 @@ export interface ExportResult {
 /**
  * 輸出：從原圖出發，只重畫變動的區域。
  * 變動區域的原像素（靠 labels 精確找出）先填回填材質，再依 regions 順序重畫：
- * 整塊整數位移 → 像素複製；否則沒拖到的段沿用原始像素輪廓、拖到的段用直線，掃描線填色。
+ * 整塊整數位移 → 像素複製；否則沿原始像素輪廓（兩端位移不同時沿長度內插），掃描線填色。
  */
 export function exportRaster(imp: Imported, model: Model, materials: Material[], backfill: string): ExportResult {
   const { width: W, height: H, original, labels } = imp;

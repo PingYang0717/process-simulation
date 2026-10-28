@@ -51,7 +51,7 @@ export function App() {
           {ed.delta ? (
             <span className="hot">
               Δx {signed(ed.delta.dx)} px，Δy {signed(ed.delta.dy)} px
-              {ed.delta.normal !== null && `，法向 ${signed(ed.delta.normal, 1)} px`}
+              {ed.delta.normal !== null && `，往外 ${signed(ed.delta.normal, 1)} px`}
               {ed.followInfo.layers ? `｜連帶 ${ed.followInfo.layers} 層` : ''}
               {ed.followInfo.blocked ? '｜已擋住（會穿層）' : ''}
             </span>

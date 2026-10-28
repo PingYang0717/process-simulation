@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as RPointerEvent } from 'react';
 import type { Editor } from '../editor/useEditor';
 import { niceStep, signed } from '../editor/view';
-import { isCorner } from '../model/drag';
+import { hasHandle, isCorner } from '../model/drag';
 import { bboxOf, pointInPoly, polyOf, ringsOf } from '../model/geometry';
 import type { XY } from '../model/types';
 import type { ExportResult } from '../raster/exportRaster';
-import { materialOf } from '../raster/exportRaster';
+import { exactRing, materialOf, segmentPts } from '../raster/exportRaster';
 import { VOID_ID } from '../raster/importRaster';
 import { RasterUnderlay } from './RasterUnderlay';
 import type { Underlay } from './RasterUnderlay';
@@ -45,7 +45,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 600, h: 500 });
-  const [normalPx, setNormalPx] = useState(2);
+  const [pushPx, setPushPx] = useState(2);
   const pan = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
   const spaceDown = useRef(false);
 
@@ -93,6 +93,11 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
   const { model, view, hover } = ed;
   const { w, h } = size;
   const k = ed.nmPerPx;
+  // 畫面輪廓與輸出同一規則：沒拖到的段沿用原始像素輪廓，所以藍線會貼著像素邊
+  const shapes = useMemo(
+    () => new Map(model.regions.map((r) => [r.id, ringsOf(r).map((ring) => exactRing(model, ed.imported, ring))])),
+    [model, ed.imported],
+  );
   const P = (x: number, y: number): XY => [x * view.s + view.tx, y * view.s + view.ty];
   const pxAt = (e: { clientX: number; clientY: number }) => {
     const r = svgRef.current!.getBoundingClientRect();
@@ -169,11 +174,17 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
     })()
     : null;
 
-  const handleVertices = [...new Set(
-    model.regions
-      .filter((r) => ed.activeIds.has(r.id))
-      .flatMap((r) => ringsOf(r).flatMap((ring) => ring.filter((_, i) => ed.hold === 'V' || isCorner(model, ring, i)))),
-  )];
+  // 把手：角（方塊）永遠有；其他頂點放大到夠開才有（圓點）；按住 V 全部都有
+  const handles = new Map<string, boolean>();
+  for (const r of model.regions) {
+    if (!ed.activeIds.has(r.id)) continue;
+    for (const ring of ringsOf(r))
+      ring.forEach((id, i) => {
+        if (handles.get(id)) return;
+        const corner = isCorner(model, ring, i);
+        if (corner || ed.hold === 'V' || hasHandle(model, ring, i, view.s)) handles.set(id, corner);
+      });
+  }
 
   return (
     <div ref={wrapRef} className="canvas-wrap" style={{ cursor }}>
@@ -217,7 +228,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
         {model.regions.map((r) => {
           const sel = regionSel.has(r.id), hov = hoverRegion === r.id, act = ed.activeIds.has(r.id);
           const mat = materialOf(ed.materials, r.material);
-          const d = ringsOf(r).map((ring) => 'M' + ring.map((v) => P(model.vertices[v].x, model.vertices[v].y).join(',')).join('L') + 'Z').join(' ');
+          const d = shapes.get(r.id)!.map((ring) => 'M' + ring.map(([x, y]) => P(x, y).join(',')).join('L') + 'Z').join(' ');
           return (
             <path
               key={r.id}
@@ -249,15 +260,18 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
           {ed.edges.filter((e) => e.regions.some((r) => ed.activeIds.has(r))).map((e) => {
             const on = edgeSel.has(e.key), hov = hoverEdges.has(e.key);
             if (!on && !hov) return null;
-            const [x1, y1] = P(model.vertices[e.a].x, model.vertices[e.a].y);
-            const [x2, y2] = P(model.vertices[e.b].x, model.vertices[e.b].y);
-            return <line key={e.key} x1={x1} y1={y1} x2={x2} y2={y2} stroke={on ? ACCENT : HOVER} strokeWidth={4} strokeLinecap="round" />;
+            const pts = [...segmentPts(model, ed.imported, e.a, e.b), [model.vertices[e.b].x, model.vertices[e.b].y] as XY];
+            return <polyline key={e.key} points={pts.map(([x, y]) => P(x, y).join(',')).join(' ')} fill="none" stroke={on ? ACCENT : HOVER} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" />;
           })}
-          {handleVertices.map((id) => {
+          {[...handles].map(([id, corner]) => {
             const v = model.vertices[id];
             const [cx, cy] = P(v.x, v.y);
             const on = vertexSel.has(id), hov = hoverVertex === id;
-            return <circle key={id} cx={cx} cy={cy} r={hov ? 6 : on ? 5 : 3} fill={on ? ACCENT : hov ? HOVER : '#fff'} stroke={ACCENT} strokeWidth={1.5} />;
+            const r = (corner ? 4.5 : 3.5) + (hov ? 2 : on ? 1 : 0);
+            const fill = on ? ACCENT : hov ? HOVER : '#fff';
+            return corner
+              ? <rect key={id} x={cx - r} y={cy - r} width={2 * r} height={2 * r} fill={fill} stroke={ACCENT} strokeWidth={1.5} />
+              : <circle key={id} cx={cx} cy={cy} r={r} fill={fill} stroke={ACCENT} strokeWidth={1.5} />;
           })}
         </g>
 
@@ -303,7 +317,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
           const [cx, cy] = P(d.cur.x, d.cur.y);
           const lines = [
             `Δx ${signed(d.dx)} px (${signed(d.dx * k, 1)} nm)   Δy ${signed(d.dy)} px (${signed(d.dy * k, 1)} nm)`,
-            d.normal !== null ? `法向 ${signed(d.normal, 1)} px (${signed(d.normal * k, 1)} nm)` : `位移 ${Math.hypot(d.dx, d.dy).toFixed(1)} px`,
+            d.normal !== null ? `往外 ${signed(d.normal, 1)} px (${signed(d.normal * k, 1)} nm)` : `位移 ${Math.hypot(d.dx, d.dy).toFixed(1)} px`,
           ];
           const bw = 310, bh = 40;
           const x = Math.min(cx + 14, w - bw - 2), y = Math.max(2, cy - bh - 14);
@@ -321,12 +335,14 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
         <div className="floatbar" style={floatPos} onPointerDown={(e) => e.stopPropagation()}>
           {handlesSelected ? (
             <>
-              <span className="dim">{ed.vertexSel.length ? `${ed.vertexSel.length} 頂點` : `${ed.edgeSel.length} 邊`}</span>
+              <span className="dim">{ed.vertexSel.length ? `${ed.vertexSel.length} 頂點` : `${ed.edgeSel.length} 段邊`}</span>
               {ed.edgeSel.length > 0 && (
-                <>
-                  <input type="number" value={normalPx} step={1} onChange={(e) => setNormalPx(+e.target.value)} title="沿法線位移 px" />
-                  <button onClick={() => ed.applyNormalOffset(normalPx)}>法向 {normalPx >= 0 ? '+' : ''}{normalPx} px</button>
-                </>
+                <span className="grp" title="每段邊沿自己的垂直方向推，遠離你點的那個區域；負值往內縮">
+                  {ed.edgeOwner ? `${model.regions.find((r) => r.id === ed.edgeOwner)?.label ?? ''} ` : ''}往外推
+                  <input type="number" value={pushPx} step={1} onChange={(e) => setPushPx(+e.target.value)} onKeyDown={(e) => e.key === 'Enter' && ed.pushOutward(pushPx)} />
+                  px
+                  <button onClick={() => ed.pushOutward(pushPx)}>套用</button>
+                </span>
               )}
             </>
           ) : (
@@ -336,6 +352,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
               <button onClick={() => ed.bringToFront()}>移到最上層</button>
             </>
           )}
+          <span className="dim sep">微移</span>
           <button onClick={() => ed.nudge(0, -1)} title="↑ 1 px">↑</button>
           <button onClick={() => ed.nudge(0, 1)} title="↓ 1 px">↓</button>
           <button onClick={() => ed.nudge(-1, 0)} title="← 1 px">←</button>

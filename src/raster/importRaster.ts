@@ -20,7 +20,8 @@ export function importRaster(img: RasterImage, nmPerPx: number, opts: ImportOpti
       const d = (kr - r) ** 2 + (kg - g) ** 2 + (kb - b) ** 2;
       if (d < bd) { bd = d; best = k; }
     }
-    return { id: `m${i}`, name: bd < 900 * 3 ? best.name : `色塊 ${hex}`, fill: hex };
+    // 只在顏色幾乎相同時才套已知名稱，猜錯比不猜糟；其餘顯示編號（面板上看得到色碼），可雙擊改名
+    return { id: `m${i}`, name: bd <= 3 * 12 ** 2 ? best.name : `材質${i + 1}`, fill: hex };
   });
   materials.push({ id: VOID_ID, name: 'VOID', fill: opts.voidColor ?? '#000000', isVoid: true });
   const chains = traceChains(labels, img.width, img.height);

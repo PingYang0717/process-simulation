@@ -57,19 +57,35 @@ export function MaterialPanel({ ed }: { ed: Editor }) {
     ed.model.regions.forEach((r) => (c[r.material] = (c[r.material] ?? 0) + 1));
     return c;
   }, [ed.model]);
+  const [editing, setEditing] = useState<string | null>(null);
   const apply = ed.regionSel.length > 0;
   const current = new Set(ed.model.regions.filter((r) => apply && ed.regionSel.includes(r.id)).map((r) => r.material));
   return (
-    <Section title="材質" right={<small className="dim">{apply ? `點一下＝套用到 ${ed.regionSel.length} 個區域` : '點一下＝選取同材質'}</small>}>
+    <Section title="材質" right={<small className="dim">{apply ? `點一下＝套用到 ${ed.regionSel.length} 個區域` : '點一下＝選取同材質'}；雙擊改名</small>}>
       <div className="mats">
         {ed.materials.map((m) => (
           <button
             key={m.id}
             className={'mat' + (current.has(m.id) ? ' cur' : '') + (m.isVoid ? ' void' : '')}
-            onClick={() => (apply ? ed.setMaterial(m.id) : ed.selectByMaterial(m.id))}
+            title={`${m.name}　${m.fill}`}
+            onClick={() => editing !== m.id && (apply ? ed.setMaterial(m.id) : ed.selectByMaterial(m.id))}
+            onDoubleClick={() => setEditing(m.id)}
           >
             <span className="sw" style={{ background: m.fill }} />
-            <span className="nm">{m.name}</span>
+            {editing === m.id ? (
+              <input
+                autoFocus
+                defaultValue={m.name}
+                onClick={(e) => e.stopPropagation()}
+                onBlur={(e) => { ed.renameMaterial(m.id, e.target.value.trim()); setEditing(null); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  if (e.key === 'Escape') { (e.target as HTMLInputElement).value = m.name; setEditing(null); }
+                }}
+              />
+            ) : (
+              <span className="nm">{m.name} <span className="hex">{m.fill}</span></span>
+            )}
             <span className="ct">{counts[m.id] ?? ''}</span>
           </button>
         ))}
