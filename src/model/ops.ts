@@ -2,7 +2,7 @@ import { edgeFrame, r1 } from './geometry';
 import type { Edge, Model, XY } from './types';
 
 let uid = 0;
-const newId = (prefix: string) => `${prefix}${++uid}`;
+export const newId = (prefix: string) => `${prefix}${++uid}`;
 
 /** 位移頂點（進位到 0.1 px），回傳新 model */
 export function moveVertices(model: Model, delta: Map<string, XY>): Model {
@@ -44,10 +44,12 @@ export function detachRegions(model: Model, ids: string[]): Model {
     r.loop.forEach((v) => usedByOthers.add(v));
     r.holes?.forEach((h) => h.forEach((v) => usedByOthers.add(v)));
   }
+  const handles = new Set(model.handles);
   const copy = (v: string) => {
     if (!usedByOthers.has(v)) return v;
     const id = newId('d');
     vertices[id] = { ...vertices[v], id, src: vertices[v].src ?? v };
+    if (handles.has(v)) handles.add(id);
     return id;
   };
   const regions = model.regions.map((r) =>
@@ -56,12 +58,13 @@ export function detachRegions(model: Model, ids: string[]): Model {
   return {
     ...model,
     vertices,
+    handles: [...handles],
     regions: [...regions.filter((r) => !moving.has(r.id)), ...regions.filter((r) => moving.has(r.id))],
   };
 }
 
 /** 在環中 a→b（或 b→a）相鄰處插入 ids（ids 依 a→b 順序） */
-function insertBetween(loop: string[], a: string, b: string, ids: string[]): string[] {
+export function insertBetween(loop: string[], a: string, b: string, ids: string[]): string[] {
   const n = loop.length;
   for (let i = 0; i < n; i++) {
     const p = loop[i], q = loop[(i + 1) % n];
@@ -69,18 +72,6 @@ function insertBetween(loop: string[], a: string, b: string, ids: string[]): str
     if (p === b && q === a) return [...loop.slice(0, i + 1), ...[...ids].reverse(), ...loop.slice(i + 1)];
   }
   return loop;
-}
-
-/** 在邊上最接近 at 的位置插頂點（整數 px），寫進所有共用該邊的環 */
-export function insertVertexOnEdge(model: Model, edge: Edge, at: XY): Model {
-  const { A, u, L } = edgeFrame(model, edge);
-  const t = Math.min(L - 0.5, Math.max(0.5, (at[0] - A.x) * u[0] + (at[1] - A.y) * u[1]));
-  const id = newId('n');
-  return {
-    ...model,
-    vertices: { ...model.vertices, [id]: { id, x: Math.round(A.x + u[0] * t), y: Math.round(A.y + u[1] * t) } },
-    regions: model.regions.map((r) => (edge.regions.includes(r.id) ? { ...r, loop: insertBetween(r.loop, edge.a, edge.b, [id]) } : r)),
-  };
 }
 
 export interface BumpSpec { width: number; height: number; t: number; fromRegion: string }
@@ -100,4 +91,11 @@ export function insertBump(model: Model, edge: Edge, spec: BumpSpec): Model {
     vertices,
     regions: model.regions.map((r) => (edge.regions.includes(r.id) ? { ...r, loop: insertBetween(r.loop, edge.a, edge.b, ids) } : r)),
   };
+}
+
+/** 把頂點設為節點／取消節點（只改顯示與可拖，不動形狀） */
+export function setHandles(model: Model, ids: string[], on: boolean): Model {
+  const set = new Set(model.handles);
+  ids.forEach((id) => (on ? set.add(id) : set.delete(id)));
+  return { ...model, handles: [...set] };
 }

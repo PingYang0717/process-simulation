@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import type { Imported } from '../model/types';
 import type { View } from '../editor/view';
 
-/** compare：分割線左邊原圖、右邊輸出 */
+/** compare：左右並排，左邊原圖、右邊輸出（這個元件在 compare 時畫輸出） */
 export type Underlay = 'output' | 'original' | 'compare' | 'none';
 
 const toCanvas = (cache: { current: HTMLCanvasElement | null }, img: ImageData) => {
@@ -31,11 +31,11 @@ function diffOutline(mask: Uint8Array, W: number, H: number): Path2D | null {
 }
 
 /**
- * 底圖：輸出（預設，顏色就是材質色）、原圖、前後比對（split 為分割線的螢幕 x）或無；
+ * 底圖：輸出（預設，顏色就是材質色）、原圖或無；
  * 相異像素畫成紅色外框，不蓋住顏色。依 view 變換、不平滑（放大看得到像素）。
  */
-export function RasterUnderlay({ imported, output, diffMask, showDiff, underlay, split, view, w, h }: {
-  imported: Imported; output: Uint8ClampedArray; diffMask: Uint8Array; showDiff: boolean; underlay: Underlay; split: number; view: View; w: number; h: number;
+export function RasterUnderlay({ imported, output, diffMask, showDiff, underlay, view, w, h }: {
+  imported: Imported; output: Uint8ClampedArray; diffMask: Uint8Array; showDiff: boolean; underlay: Underlay; view: View; w: number; h: number;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const outC = useRef<HTMLCanvasElement | null>(null);
@@ -53,21 +53,11 @@ export function RasterUnderlay({ imported, output, diffMask, showDiff, underlay,
     ctx.setTransform(view.s, 0, 0, view.s, view.tx, view.ty);
     if (underlay === 'output' || underlay === 'compare') ctx.drawImage(outImg, 0, 0);
     if (underlay === 'original') ctx.drawImage(origImg, 0, 0);
-    if (underlay === 'compare') {
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.beginPath();
-      ctx.rect(0, 0, split, h);
-      ctx.clip();
-      ctx.setTransform(view.s, 0, 0, view.s, view.tx, view.ty);
-      ctx.drawImage(origImg, 0, 0);
-      ctx.restore();
-    }
     if (outline) {
       ctx.strokeStyle = '#E24B4A';
       ctx.lineWidth = Math.max(1.5, view.s * 0.12) / view.s;
       ctx.stroke(outline);
     }
-  }, [underlay, outImg, origImg, outline, split, view, w, h]);
+  }, [underlay, outImg, origImg, outline, view, w, h]);
   return <canvas ref={ref} width={w} height={h} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />;
 }

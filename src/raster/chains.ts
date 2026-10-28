@@ -99,13 +99,15 @@ export function traceChains(labels: Int32Array, W: number, H: number): Chain[] {
 
 /**
  * 鏈 → Model（px）：每條鏈簡化一次，端點以座標共用，所以相鄰區域自然得到共用頂點、不留縫。
- * 簡化後每一段記下它在原始鏈上對應的像素輪廓（exact），輸出時沒拖到的段沿用它。
+ * 簡化後每一段記下它在原始鏈上對應的像素輪廓（exact），輸出時沿用它。
+ * 另挑出預設節點（handles）：鏈的兩端與粗簡化留下的代表點，其餘頂點不顯示。
  * 每個 label 收集「左側是我」的鏈（正向）與「右側是我」的鏈（反向）串成環；
  * 外框最大的環為外輪廓，其餘為孔洞。區域依外框面積由大到小排序。
  */
 export function chainsToModel(
   chains: Chain[], count: number, colorOf: number[], materials: Material[],
   W: number, H: number, tol = 0.6,
+  handleTol = 2,
 ): { model: Model; exact: Map<string, ExactSeg> } {
   const vertices: Record<string, Vertex> = {};
   const shared = new Map<string, string>();
@@ -123,6 +125,18 @@ export function chainsToModel(
   };
   const simple = chains.map((c) => ({ ...c, pts: simplify(c.pts, tol) }));
   const ids = simple.map((c) => c.pts.map((p, i) => vid(p, i === 0 || i === c.pts.length - 1)));
+  // 預設節點：每條鏈的兩端（材質交會處）＋再以 handleTol 粗簡化留下的代表點
+  const handles = new Set<string>();
+  simple.forEach((c, ci) => {
+    const keep = simplify(c.pts, handleTol);
+    let k = 0;
+    c.pts.forEach((p, i) => {
+      if (k < keep.length && p[0] === keep[k][0] && p[1] === keep[k][1]) {
+        handles.add(ids[ci][i]);
+        k++;
+      }
+    });
+  });
   const exact = new Map<string, ExactSeg>();
   chains.forEach((c, ci) => {
     const kept = simple[ci].pts, vids = ids[ci];
@@ -188,5 +202,5 @@ export function chainsToModel(
   });
   for (const id of Object.keys(vertices)) if (!referenced.has(id)) delete vertices[id];
   regions.sort((a, b) => area(b.loop) - area(a.loop));
-  return { model: { vertices, regions, world: { x0: 0, x1: W, yTop: 0, yBot: H } }, exact };
+  return { model: { vertices, regions, world: { x0: 0, x1: W, yTop: 0, yBot: H }, handles: [...handles].filter((v) => referenced.has(v)) }, exact };
 }

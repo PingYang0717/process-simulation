@@ -9,7 +9,7 @@ import { exportRaster } from './raster/exportRaster';
 import type { ExportResult } from './raster/exportRaster';
 import { VOID_ID } from './raster/importRaster';
 
-const HOLD = { V: '頂點', E: '邊', R: '區域' } as const;
+const HOLD = { V: '節點（顯示全部的點）', E: '邊', R: '區域' } as const;
 
 export function App() {
   const ed = useEditor();
@@ -18,6 +18,8 @@ export function App() {
   const [showDiff, setShowDiff] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
   const [backfill, setBackfill] = useState(VOID_ID);
+  const [showLeft, setShowLeft] = useState(true);
+  const [showRight, setShowRight] = useState(true);
   const last = useRef<ExportResult | null>(null);
   // 拖拉中即時重算（約 20 ms / 640×360）；超過 1M 像素的大圖才沿用上一次，放開再算
   const big = ed.imported.width * ed.imported.height > 1_000_000;
@@ -30,15 +32,16 @@ export function App() {
   const cut = CUTS.find((c) => c.id === ed.cut)!;
   const h = ed.hover;
   const labelOf = (id: string) => ed.model.regions.find((r) => r.id === id)?.label;
-  const pointing = h.kind === 'vertex' ? `頂點 ${h.id}` : h.kind === 'edge' ? `邊 ×${h.group.length}（${labelOf(h.region)}）` : h.kind === 'region' ? labelOf(h.id) : '';
+  const pointing = h.kind === 'vertex' ? `${labelOf(h.region)} 的節點` : h.kind === 'edge' ? `${labelOf(h.region)} 的邊` : h.kind === 'region' ? labelOf(h.id) : '';
 
   return (
-    <div className="app">
+    <div className={'app' + (showLeft ? '' : ' no-left') + (showRight ? '' : ' no-right')}>
       <LeftPanel ed={ed} />
       <main className="center">
         <div className="ctool">
+          <button className="side" onClick={() => setShowLeft(!showLeft)} title={showLeft ? '收合左欄' : '展開左欄'}>{showLeft ? '◀' : '▶'} 圖片與說明</button>
           <span className="title">
-            {cut.name} <small>PNG → 分割 → 編輯 → PNG</small>
+            {cut.name} <small>{ed.imported.source ?? '內建範例'}</small>
           </span>
           <span className="grow" />
           <button onClick={ed.undo} disabled={!ed.history.length}>↶ Undo {ed.history.length || ''}</button>
@@ -46,6 +49,7 @@ export function App() {
           <button onClick={ed.selectAll}>全選</button>
           <button onClick={ed.clearSel} disabled={!ed.regionSel.length}>取消選取</button>
           <button onClick={ed.reset}>重設</button>
+          <button className="side" onClick={() => setShowRight(!showRight)} title={showRight ? '收合右欄' : '展開右欄'}>顯示與輸出 {showRight ? '▶' : '◀'}</button>
         </div>
         <SectionCanvas ed={ed} underlay={underlay} result={result} overlayAlpha={alpha} showDiff={showDiff} showLabels={showLabels} />
         <div className="status">
@@ -53,20 +57,20 @@ export function App() {
             <span className="hot">
               Δx {signed(ed.delta.dx)} px，Δy {signed(ed.delta.dy)} px
               {ed.delta.normal !== null && `，往外 ${signed(ed.delta.normal, 1)} px`}
-              {ed.followInfo.layers ? `｜連帶 ${ed.followInfo.layers} 層` : ''}
-              {ed.followInfo.blocked ? '｜已擋住（會穿層）' : ''}
+              {ed.followInfo.layers ? `｜外面 ${ed.followInfo.layers} 層一起推` : ''}
+              {ed.followInfo.blocked ? '｜已停住（再推會穿過旁邊的層）' : ''}
             </span>
           ) : (
             <span>
-              {pointing ? `指向：${pointing}　` : ''}已選 {ed.regionSel.length} 區域
-              {ed.edgeSel.length ? `、${ed.edgeSel.length} 邊` : ''}
-              {ed.vertexSel.length ? `、${ed.vertexSel.length} 頂點` : ''}
+              {pointing ? `${pointing}　` : ''}已選 {ed.regionSel.length} 個區域
+              {ed.edgeSel.length ? `、${ed.edgeSel.length} 段邊` : ''}
+              {ed.vertexSel.length ? `、${ed.vertexSel.length} 個節點` : ''}
               {ed.hold ? `｜只抓${HOLD[ed.hold]}` : ''}
             </span>
           )}
           <span className="grow" />
           <span className="dim">
-            {ed.model.regions.length} 區域／{Object.keys(ed.model.vertices).length} 頂點｜相異 {result.diffPx.toLocaleString()} px
+            {ed.model.regions.length} 個區域｜改動 {result.diffPx.toLocaleString()} 像素
           </span>
         </div>
       </main>

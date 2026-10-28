@@ -27,20 +27,6 @@ export function isCorner(model: Model, ring: string[], i: number, minDeg = 50, w
   return (Math.acos(cos) * 180) / Math.PI >= minDeg;
 }
 
-/**
- * 頂點把手：角永遠有；其他頂點在放大到與前後鄰點都相距 ≥ minGap 螢幕 px 時才有
- * （縮小時像素階梯的頂點擠在一起，抓不準，留給「推平滑邊」）。
- */
-export function hasHandle(model: Model, ring: string[], i: number, scale: number, minGap = 14): boolean {
-  if (isCorner(model, ring, i)) return true;
-  const n = ring.length;
-  const p = model.vertices[ring[i]];
-  return [ring[(i - 1 + n) % n], ring[(i + 1) % n]].every((id) => {
-    const q = model.vertices[id];
-    return Math.hypot(q.x - p.x, q.y - p.y) * scale >= minGap;
-  });
-}
-
 /** 平滑邊：從 a–b 沿環往兩側走到「角」為止，回傳整段的 edgeKey */
 export function smoothEdgeGroup(model: Model, region: Region, a: string, b: string, minDeg = 50): string[] {
   const ring = ringsOf(region).find((r) =>
@@ -217,13 +203,14 @@ export function outwardShifts(model: Model, owner: Region, keys: Set<string>, d:
 }
 
 /**
- * 柔性拖點：沿輪廓往兩側走，弧長 s < radius 的頂點權重 0.5·(1 + cos(π·s / radius))；
- * 碰到角、或下一段會跨出半徑的頂點就停（它們不動）。
- * 只拖單一點時鄰點不動，像素階梯會被拉成鋸齒；讓附近的點按比例跟著走，輪廓就保持順。
+ * 柔性拖點：從被拖的節點沿輪廓往兩側走到下一個節點（錨點，不動）為止，
+ * 中間的頂點依弧長比例 t 以 0.5·(1 + cos(π·t)) 跟著動。拖一個節點，就是改它與左右節點之間的那段輪廓；
+ * 只拖單一點時鄰點不動，像素階梯會被拉成鋸齒。
  */
-export function falloffWeights(model: Model, seeds: string[], radius: number): Map<string, number> {
+export function falloffWeights(model: Model, seeds: string[], isAnchor: (id: string) => boolean): Map<string, number> {
   const w = new Map<string, number>();
   const put = (id: string, v: number) => { if (v > (w.get(id) ?? 0)) w.set(id, v); };
+  const seedSet = new Set(seeds);
   for (const seed of seeds) {
     put(seed, 1);
     for (const r of model.regions)
@@ -232,18 +219,18 @@ export function falloffWeights(model: Model, seeds: string[], radius: number): M
         if (i0 < 0) continue;
         const n = ring.length;
         for (const step of [1, -1]) {
-          let s = 0, k = i0;
+          const path: { id: string; s: number }[] = [];
+          let s = 0, k = i0, total = 0;
           for (let c = 0; c < n - 1; c++) {
             const prev = model.vertices[ring[k]];
             k = (k + step + n) % n;
             const q = model.vertices[ring[k]];
             s += Math.hypot(q.x - prev.x, q.y - prev.y);
-            if (s >= radius || k === i0 || isCorner(model, ring, k)) break;
-            // 下一段長到跨出半徑（例如接上長直邊）也當錨點，不然整條直邊會被拉斜
-            const after = model.vertices[ring[(k + step + n) % n]];
-            if (s + Math.hypot(after.x - q.x, after.y - q.y) > radius) break;
-            put(ring[k], 0.5 * (1 + Math.cos((Math.PI * s) / radius)));
+            if (isAnchor(ring[k]) || seedSet.has(ring[k])) { total = s; break; }
+            path.push({ id: ring[k], s });
           }
+          if (!total) continue; // 整圈沒有其他節點：不帶動
+          path.forEach(({ id, s: d }) => put(id, 0.5 * (1 + Math.cos((Math.PI * d) / total))));
         }
       }
   }

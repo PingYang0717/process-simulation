@@ -20,9 +20,10 @@ export function regionChanged(model: Model, original: Model, region: Region): bo
   return h1.length !== h0.length || !h1.every((h, i) => sameRing(h, h0[i]));
 }
 
-/** 頂點相對載入時的整數位移；分離出來的頂點對 src 比；非整數或找不到回傳 null */
+/** 頂點相對載入時的整數位移；分離出來的頂點對 src 比，新增的節點對 ox/oy 比；非整數或找不到回傳 null */
 function shiftOf(model: Model, imp: Imported, id: string): XY | null {
-  const v = model.vertices[id], o = imp.model.vertices[v.src ?? id];
+  const v = model.vertices[id];
+  const o = v.ox !== undefined && v.oy !== undefined ? { x: v.ox, y: v.oy } : imp.model.vertices[v.src ?? id];
   if (!o) return null;
   const dx = v.x - o.x, dy = v.y - o.y;
   return Number.isInteger(dx) && Number.isInteger(dy) ? [dx, dy] : null;
@@ -166,7 +167,7 @@ export function exportRaster(imp: Imported, model: Model, materials: Material[],
       modes[r.id] = rings.some((ring) => ring.length > r.loop.length) ? 'exact' : 'poly';
       fillRings(out, hits, W, H, rings, rgb);
       const b = bboxOf(rings[0]);
-      if (Math.min(b.x1 - b.x0, b.y1 - b.y0) < 2) warnings.push(`${r.label} 厚度不足 2 px`);
+      if (Math.min(b.x1 - b.x0, b.y1 - b.y0) < 2) warnings.push(`${r.label} 變得太薄（不到 2 像素）`);
     }
   }
 
@@ -204,8 +205,8 @@ export function exportRaster(imp: Imported, model: Model, materials: Material[],
   }
   const before = new Map<string, number>();
   perLabel.forEach((n, l) => before.set(imp.labelMaterial[l], (before.get(imp.labelMaterial[l]) ?? 0) + n));
-  if (foreign) warnings.push(`${foreign} 個像素的顏色不在調色盤內`);
-  if (overlapPx) warnings.push(`${overlapPx} 個像素被兩個區域重疊覆蓋（依順序取後者）`);
+  if (foreign) warnings.push(`有 ${foreign} 個像素的顏色不屬於任何材質（原圖本來就有的邊緣混色）`);
+  if (overlapPx) warnings.push(`有 ${overlapPx} 個像素被兩個區域蓋到（以上層的為準）`);
   const byMaterial = materials
     .map((m, i) => ({ id: m.id, name: m.name, before: before.get(m.id) ?? 0, after: after[i] }))
     .filter((t) => t.before || t.after);

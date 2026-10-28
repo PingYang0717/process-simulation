@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { falloffWeights, hasHandle, outwardShifts, propagateLayers, smoothEdgeGroup, violates } from '../model/drag';
+import { falloffWeights, outwardShifts, propagateLayers, smoothEdgeGroup, violates } from '../model/drag';
 import { bboxOf, edgeFrame, edgeKey, edgesOf, pointInPoly, polyOf, ringsOf } from '../model/geometry';
-import { clampToWorld, detachRegions, insertVertexOnEdge, moveVertices } from '../model/ops';
+import { clampToWorld, detachRegions, moveVertices, setHandles } from '../model/ops';
+import { insertNode } from '../raster/nodes';
 import type { CutId, CutState, Edge, Imported, Model, XY } from '../model/types';
 import { demoX, demoY, demoZ } from '../raster/demo';
 import { importRaster } from '../raster/importRaster';
@@ -14,10 +15,10 @@ const HISTORY_MAX = 50;
 /** 游標吸附半徑（螢幕 px）：頂點 7、邊 6 */
 const SNAP_VERTEX = 7, SNAP_EDGE = 6;
 
-export const CUTS: { id: CutId; name: string; desc: string; demo: () => RasterImage }[] = [
-  { id: 'x', name: 'X-Cut', desc: '沿通道：3 根 poly gate', demo: demoX },
-  { id: 'y', name: 'Y-Cut', desc: '跨 fin：3 根 fin', demo: demoY },
-  { id: 'z', name: 'Z-Cut', desc: '俯視', demo: demoZ },
+export const CUTS: { id: CutId; name: string; demo: () => RasterImage }[] = [
+  { id: 'x', name: 'X-Cut', demo: demoX },
+  { id: 'y', name: 'Y-Cut', demo: demoY },
+  { id: 'z', name: 'Z-Cut', demo: demoZ },
 ];
 
 const initialCuts = (): Record<CutId, CutState> => {
@@ -86,10 +87,12 @@ export function useEditor() {
   const [canvas, setCanvas] = useState<Size>({ w: 600, h: 500 });
   const [menu, setMenu] = useState<{ region: string; x: number; y: number } | null>(null);
   const edges = useMemo(() => edgesOf(model), [model]);
+  const handleSet = useMemo(() => new Set(model.handles), [model.handles]);
   const edgeByKey = useMemo(() => new Map<string, Edge>(edges.map((e) => [e.key, e])), [edges]);
 
   // 給 window 事件與 callback 讀最新值
   const modelRef = useRef(model); modelRef.current = model;
+  const handleSetRef = useRef(handleSet); handleSetRef.current = handleSet;
   const importedRef = useRef(imported); importedRef.current = imported;
   const gestureRef = useRef(gesture); gestureRef.current = gesture;
   const regionSelRef = useRef(regionSel); regionSelRef.current = regionSel;
@@ -191,7 +194,7 @@ export function useEditor() {
             const v = m.vertices[ring[i]];
             const d = d2(v.x, v.y);
             if (d > SNAP_VERTEX ** 2 || (best && d >= best.d)) continue;
-            if (h !== 'V' && !hasHandle(m, ring, i, s)) continue;
+            if (h !== 'V' && !handleSetRef.current.has(ring[i])) continue; // 只有節點能抓；按住 V 全部都能抓
             best = { id: ring[i], region: r.id, d };
           }
       }
@@ -269,6 +272,36 @@ export function useEditor() {
     setGesture(next);
   }, [markBaseline]);
 
+  /**
+   * 新增節點：游標附近（約 8 螢幕 px）若已有輪廓上的點就把它設成節點，
+   * 否則在原始像素輪廓上切一個新點。兩種都不改變形狀。
+   */
+  const addNodeAt = useCallback((at: Pt) => {
+    const m = modelRef.current;
+    const hit = hitTest(at);
+    if (hit.kind !== 'edge') return;
+    const [a, b] = hit.key.split('|');
+    const reach = Math.max(1.5, 8 / viewRef.current.s);
+    let best = '', bd = reach;
+    for (const id of [a, b]) {
+      const v = m.vertices[id];
+      const d = Math.hypot(v.x - at.x, v.y - at.y);
+      if (d <= bd) { bd = d; best = id; }
+    }
+    const next = best ? setHandles(m, [best], true) : insertNode(m, importedRef.current, a, b, [at.x, at.y]).model;
+    const added = best || next.handles[next.handles.length - 1];
+    commit(next);
+    setVertexSel([added]);
+    setEdgeSel([]);
+  }, [hitTest, commit]);
+
+  /** 刪除節點：只是不再當節點（不顯示、不能抓），輪廓形狀不變 */
+  const deleteNodes = useCallback(() => {
+    if (!vertexSelRef.current.length) return;
+    commit(setHandles(modelRef.current, vertexSelRef.current, false));
+    setVertexSel([]);
+  }, [commit]);
+
   const pointerDown = useCallback((at: Pt, mods: Mods) => {
     setMenu(null);
     const m = modelRef.current;
@@ -297,8 +330,7 @@ export function useEditor() {
     const scope = regionSelRef.current.includes(hit.region) ? regionSelRef.current : [...regionSelRef.current, hit.region];
     setRegionSel(scope);
     if (hit.kind === 'edge' && mods.alt) {
-      const e = edgeByKey.get(hit.key);
-      if (e) commit(insertVertexOnEdge(m, e, [Math.round(at.x), Math.round(at.y)]));
+      addNodeAt(at);
       return;
     }
     if (hit.kind === 'edge') {
@@ -331,7 +363,7 @@ export function useEditor() {
     setEdgeSel([]);
     if (mods.ctrl) return;
     startMove({ start: at, vertexIds: next, regionIds: scope, detach: false, falloff: true });
-  }, [hitTest, clearSel, startMove, edgeByKey, commit, expandMirror]);
+  }, [hitTest, clearSel, startMove, edgeByKey, expandMirror, addNodeAt]);
 
   const pointerMove = useCallback((at: Pt) => {
     const g = gestureRef.current;
@@ -349,9 +381,9 @@ export function useEditor() {
     // 區域整塊拖：第一次移動才分離共用頂點，只點不拖不改模型
     const base = g.base ?? (g.detach ? detachRegions(g.startModel, g.regionIds) : g.startModel);
     const ids = g.detach ? ringVertices(base, g.regionIds) : g.vertexIds;
-    // 拖頂點：附近的點依弧長按比例跟著走（半徑隨拖拉距離放大）；按住 Shift 只動這一點
-    const radius = Math.max(6, 2.5 * Math.hypot(d[0], d[1]));
-    const weights = g.falloff && !shiftRef.current ? falloffWeights(base, ids, radius) : undefined;
+    // 拖節點：與左右節點之間的輪廓按比例跟著走（左右節點不動）；按住 Shift 只動這一點
+    const anchors = new Set(base.handles);
+    const weights = g.falloff && !shiftRef.current ? falloffWeights(base, ids, (id) => anchors.has(id)) : undefined;
     const { disp, layers, blocked } = resolveDisp(base, ids, d, g.detach, weights);
     setFollowInfo({ layers, blocked });
     const next = { ...g, base, cur: at, moved: true };
@@ -404,7 +436,9 @@ export function useEditor() {
       ? ringVertices(base, regionSelRef.current)
       : vertexSelRef.current.length ? vertexSelRef.current : edgeGroupVertices(edgeSelRef.current);
     if (!ids.length) return;
-    const { disp, layers, blocked } = resolveDisp(base, ids, [dx, dy], whole);
+    const anchors = new Set(base.handles);
+    const weights = vertexSelRef.current.length && !whole ? falloffWeights(base, ids, (id) => anchors.has(id)) : undefined;
+    const { disp, layers, blocked } = resolveDisp(base, ids, [dx, dy], whole, weights);
     setFollowInfo({ layers, blocked });
     commit(clampToWorld(moveVertices(base, disp)));
   }, [commit, resolveDisp]);
@@ -538,6 +572,7 @@ export function useEditor() {
       if (mod && k === 'a') { e.preventDefault(); selectAll(); return; }
       if (mod && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
       if (mod && k === 'y') { e.preventDefault(); redo(); return; }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && vertexSelRef.current.length) { e.preventDefault(); deleteNodes(); return; }
       if (e.key === 'Escape') {
         // 先清把手，再清區域
         if (vertexSelRef.current.length || edgeSelRef.current.length) { setEdgeSel([]); setVertexSel([]); }
@@ -567,7 +602,7 @@ export function useEditor() {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
     };
-  }, [selectAll, undo, redo, fit, zoomAt, nudge, clearSel]);
+  }, [selectAll, undo, redo, fit, zoomAt, nudge, clearSel, deleteNodes]);
 
   const delta = useMemo(() => {
     if (!gesture || gesture.kind !== 'move' || !gesture.moved) return null;
@@ -587,7 +622,7 @@ export function useEditor() {
 
   return {
     cut, setCut, imported, loadImage, setNmPerPx, nmPerPx: imported.nmPerPx, materials, model, edges, edgeByKey,
-    regionSel, edgeSel, vertexSel, edgeOwner, hover, hold, activeIds,
+    regionSel, edgeSel, vertexSel, edgeOwner, hover, handleSet, addNodeAt, deleteNodes, hold, activeIds,
     mirror, setMirror, follow, setFollow, followInfo,
     history, future, baseline, pinBaseline, clearBaseline,
     delta, box, dragging: gesture?.kind === 'move' && gesture.moved,

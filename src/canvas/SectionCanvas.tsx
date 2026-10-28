@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as RPointerEvent } from 'react';
 import type { Editor } from '../editor/useEditor';
 import { niceStep, signed } from '../editor/view';
-import { hasHandle, isCorner } from '../model/drag';
+import { isCorner } from '../model/drag';
 import { bboxOf, pointInPoly, polyOf, ringsOf } from '../model/geometry';
 import type { XY } from '../model/types';
 import type { ExportResult } from '../raster/exportRaster';
@@ -46,7 +46,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 600, h: 500 });
   const [pushPx, setPushPx] = useState(2);
-  const [split, setSplit] = useState(0.5); // 前後比對分割線位置（畫布寬度比例）
+  const [cursorPt, setCursorPt] = useState<XY | null>(null); // 前後比對時，左邊原圖上同步的十字
   const [peek, setPeek] = useState(false); // 按住 B 暫時看原圖
   const pan = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
   const spaceDown = useRef(false);
@@ -138,7 +138,9 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
       ed.setView({ s: view.s, tx: pan.current.tx + e.clientX - pan.current.x, ty: pan.current.ty + e.clientY - pan.current.y });
       return;
     }
-    ed.pointerMove(pxAt(e));
+    const at = pxAt(e);
+    if (underlay === 'compare') setCursorPt([at.x, at.y]);
+    ed.pointerMove(at);
   };
 
   // 游標：角 → 十字、邊 → 垂直於邊的雙箭頭、區域 → 四箭頭
@@ -177,25 +179,29 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
   const floatPos = selBox
     ? (() => {
       const [x, y] = P(selBox.x1, selBox.y0);
-      return { left: Math.min(w - 300, Math.max(4, x + 12)), top: Math.max(4, Math.min(h - 40, y - 44)) };
+      const top = Math.max(4, Math.min(h - 40, y - 44));
+      // 工具列約 460 px 寬；靠近右緣時改貼齊右邊，不要超出畫布
+      return x + 12 + 460 > w ? { right: 8, top } : { left: Math.max(4, x + 12), top };
     })()
     : null;
 
-  // 把手：角（方塊）永遠有；其他頂點放大到夠開才有（圓點）；按住 V 全部都有
+  // 節點：只畫已選或游標所在區域的節點；角畫方塊、其他畫圓點；按住 V 顯示全部輪廓點
   const handles = new Map<string, boolean>();
   for (const r of model.regions) {
     if (!ed.activeIds.has(r.id)) continue;
     for (const ring of ringsOf(r))
       ring.forEach((id, i) => {
-        if (handles.get(id)) return;
-        const corner = isCorner(model, ring, i);
-        if (corner || ed.hold === 'V' || hasHandle(model, ring, i, view.s)) handles.set(id, corner);
+        if (handles.has(id) || (ed.hold !== 'V' && !ed.handleSet.has(id))) return;
+        handles.set(id, isCorner(model, ring, i));
       });
   }
 
   return (
-    <div ref={wrapRef} className="canvas-wrap" style={{ cursor }}>
-      <RasterUnderlay imported={ed.imported} output={result.data} diffMask={result.diffMask} showDiff={showDiff} underlay={peek ? 'original' : underlay} split={split * w} view={view} w={w} h={h} />
+    <div className="canvas-area">
+    {underlay === 'compare' && <OriginalPane ed={ed} diffMask={result.diffMask} showDiff={showDiff} cursorPt={cursorPt} />}
+    <div ref={wrapRef} className="canvas-wrap" style={{ cursor }} onPointerLeave={() => setCursorPt(null)}>
+      {underlay === 'compare' && <span className="pane-tag">輸出（在這邊編輯）</span>}
+      <RasterUnderlay imported={ed.imported} output={result.data} diffMask={result.diffMask} showDiff={showDiff} underlay={peek ? 'original' : underlay} view={view} w={w} h={h} />
       <svg
         ref={svgRef}
         width={w}
@@ -204,6 +210,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={() => (pan.current = null)}
+        onDoubleClick={(e) => ed.addNodeAt(pxAt(e))}
         onContextMenu={(e) => e.preventDefault()}
       >
         <rect width={w} height={h} fill={underlay === 'none' ? '#F7F8FA' : 'transparent'} />
@@ -337,24 +344,6 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
         })()}
       </svg>
 
-      {underlay === 'compare' && !peek && (
-        <div
-          className="split"
-          style={{ left: split * w }}
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            (e.target as HTMLElement).setPointerCapture(e.pointerId);
-          }}
-          onPointerMove={(e) => {
-            if (!(e.target as HTMLElement).hasPointerCapture(e.pointerId)) return;
-            const r = wrapRef.current!.getBoundingClientRect();
-            setSplit(Math.min(0.98, Math.max(0.02, (e.clientX - r.left) / r.width)));
-          }}
-        >
-          <span className="tag l">原圖</span>
-          <span className="tag r">輸出</span>
-        </div>
-      )}
       {peek && <div className="peek">原圖（放開 B 回到輸出）</div>}
 
       {/* 浮動工具列：外框右上 */}
@@ -362,7 +351,8 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
         <div className="floatbar" style={floatPos} onPointerDown={(e) => e.stopPropagation()}>
           {handlesSelected ? (
             <>
-              <span className="dim">{ed.vertexSel.length ? `${ed.vertexSel.length} 頂點` : `${ed.edgeSel.length} 段邊`}</span>
+              <span className="dim">{ed.vertexSel.length ? `${ed.vertexSel.length} 個節點` : `${ed.edgeSel.length} 段邊`}</span>
+              {ed.vertexSel.length > 0 && <button onClick={ed.deleteNodes} title="不再當節點；形狀不變（Delete 鍵）">刪除節點</button>}
               {ed.edgeSel.length > 0 && (
                 <span className="grp" title="每段邊沿自己的垂直方向推，遠離你點的那個區域；負值往內縮">
                   {ed.edgeOwner ? `${model.regions.find((r) => r.id === ed.edgeOwner)?.label ?? ''} ` : ''}往外推
@@ -400,6 +390,34 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
           <div className="sep" />
           <button onClick={() => ed.bringToFront(ed.regionSel.length ? ed.regionSel : [ed.menu!.region])}>移到最上層</button>
         </div>
+      )}
+    </div>
+    </div>
+  );
+}
+
+/** 前後比對左半邊：原圖（不可編輯），與右邊同一個縮放平移，游標位置畫十字對照 */
+function OriginalPane({ ed, diffMask, showDiff, cursorPt }: { ed: Editor; diffMask: Uint8Array; showDiff: boolean; cursorPt: XY | null }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 600, h: 500 });
+  useEffect(() => {
+    if (!ref.current) return;
+    const ro = new ResizeObserver(([entry]) => setSize({ w: Math.floor(entry.contentRect.width), h: Math.floor(entry.contentRect.height) }));
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, []);
+  const { view } = ed;
+  const c = cursorPt && [cursorPt[0] * view.s + view.tx, cursorPt[1] * view.s + view.ty];
+  return (
+    <div ref={ref} className="canvas-wrap readonly">
+      <span className="pane-tag">原圖</span>
+      <RasterUnderlay imported={ed.imported} output={ed.imported.original} diffMask={diffMask} showDiff={showDiff} underlay="original" view={view} w={size.w} h={size.h} />
+      {c && (
+        <svg width={size.w} height={size.h} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          <line x1={c[0]} y1={0} x2={c[0]} y2={size.h} stroke="#111827" strokeOpacity={0.5} strokeDasharray="4 3" />
+          <line x1={0} y1={c[1]} x2={size.w} y2={c[1]} stroke="#111827" strokeOpacity={0.5} strokeDasharray="4 3" />
+          <circle cx={c[0]} cy={c[1]} r={5} fill="none" stroke="#111827" strokeWidth={1.5} />
+        </svg>
       )}
     </div>
   );

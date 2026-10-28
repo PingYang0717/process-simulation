@@ -5,50 +5,59 @@ import { decodeImage, importRaster } from '../raster/importRaster';
 import type { RasterImage } from '../model/types';
 import { Section } from './ui';
 
-const KEYS: [string, string][] = [
-  ['游標靠近頂點', '變十字 → 拖那顆頂點'],
-  ['游標靠近邊', '變雙箭頭 → 推整段平滑邊（Shift 只推一小段）；外層襯層預設跟著走'],
-  ['區域內部', '變四箭頭 → 整塊搬動（鄰居不動，空位回填）'],
-  ['空白處拖拉', '框選區域'],
-  ['Shift / Ctrl 點', '加選 / 切換'],
-  ['按住 V / E / R', '暫時只抓 頂點 / 邊 / 區域'],
-  ['Alt 點邊', '插入頂點'],
-  ['右鍵區域', '材質選單'],
-  ['方向鍵', '1 px（Shift 10 px）'],
-  ['滾輪 / Space 拖', '縮放 / 平移'],
-  ['Ctrl+Z / Y、Esc', 'Undo / Redo、取消'],
+/** 操作說明：照「想做什麼」分組，一句話講完 */
+const HELP: [string, [string, string][]][] = [
+  ['移動', [
+    ['整塊搬', '在區域裡面按住拖。'],
+    ['推一條邊', '滑到邊上（游標變雙箭頭）按住拖，整段弧線一起動、兩端的角不動。按住 Shift 只推那一小段。'],
+    ['拉節點', '滑到藍色節點按住拖，只會改到它和左右兩個節點之間的線。按住 Shift 只動這一點。'],
+    ['微調', '選好後按方向鍵，一次 1 像素；Shift + 方向鍵一次 10。'],
+  ]],
+  ['節點', [
+    ['新增', '在邊上雙擊。'],
+    ['刪除', '點選節點後按 Delete（形狀不變，只是不再顯示）。'],
+    ['看全部的點', '按住 V。'],
+  ]],
+  ['選取', [
+    ['選一個', '點一下；Shift 點可以加選，Ctrl 點加選或取消。'],
+    ['選一堆', '在空白處拖出一個框。'],
+    ['換材質', '在區域上按右鍵。'],
+  ]],
+  ['畫面', [
+    ['縮放／移動', '滾輪縮放；按住空白鍵拖曳移動；按 F 看整張圖。'],
+    ['對照原圖', '按住 B 暫時看原圖。'],
+    ['復原', 'Ctrl+Z 復原、Ctrl+Y 重做、Esc 取消選取。'],
+  ]],
 ];
 
 export function LeftPanel({ ed }: { ed: Editor }) {
   const [busy, setBusy] = useState(false);
   const [minPx, setMinPx] = useState(12);
-  const source = useRef<RasterImage | null>(null);
+  const source = useRef<{ img: RasterImage; name?: string } | null>(null);
   const cut = CUTS.find((c) => c.id === ed.cut)!;
-  const segment = async (img: RasterImage) => {
+  const segment = async (img: RasterImage, name?: string) => {
     setBusy(true);
     await new Promise((r) => setTimeout(r, 0));
-    ed.loadImage(importRaster(img, ed.nmPerPx, { minPx }));
+    ed.loadImage({ ...importRaster(img, ed.nmPerPx, { minPx }), source: name });
     setBusy(false);
   };
   const { imported } = ed;
+  const materialCount = ed.materials.filter((m) => !m.isVoid).length;
   return (
     <aside className="left">
-      <Section title="TCAD Cut Direction">
+      <Section title="剖面方向">
         {CUTS.map((c) => (
           <button key={c.id} className={'cut' + (ed.cut === c.id ? ' on' : '')} onClick={() => ed.setCut(c.id)}>
-            <span>
-              <b>{c.name}</b>
-              <small>{c.desc}</small>
-            </span>
+            <b>{c.name}</b>
           </button>
         ))}
-        <small className="dim">每個方向各自一張 PNG，各自保留編輯與 Undo。</small>
       </Section>
 
-      <Section title={`輸入影像（${cut.name}）`}>
+      <Section title={`輸入圖片（${cut.name}）`}>
         <div className="small">
-          {imported.width} × {imported.height} px　{imported.palette.length} 色　{ed.model.regions.length} 區域
-          {imported.merged ? `　併入碎片 ${imported.merged}` : ''}
+          {imported.source ?? '內建範例'}
+          <br />
+          <span className="dim">{imported.width} × {imported.height} 像素 · {materialCount} 種材質 · {ed.model.regions.length} 個區域</span>
         </div>
         <label className="file">
           <input
@@ -57,51 +66,59 @@ export function LeftPanel({ ed }: { ed: Editor }) {
             onChange={async (e) => {
               const f = e.target.files?.[0];
               if (!f) return;
-              source.current = await decodeImage(f);
-              segment(source.current);
+              source.current = { img: await decodeImage(f), name: f.name };
+              segment(source.current.img, f.name);
+              e.target.value = '';
             }}
           />
-          載入 PNG…
+          上傳 PNG…
         </label>
         <button
           onClick={() => {
-            source.current = cut.demo();
-            segment(source.current);
+            source.current = { img: cut.demo() };
+            segment(source.current.img);
           }}
           disabled={busy}
         >
-          載入範例
+          用範例
         </button>
         <div className="row" style={{ marginTop: 8 }}>
-          <label className="num" style={{ width: 90 }}>
-            <span>1 px = ? nm</span>
+          <label className="num" style={{ width: 96 }}>
+            <span>1 像素 = ? nm</span>
             <input type="number" step={0.05} value={ed.nmPerPx} onChange={(e) => { const v = +e.target.value; if (v > 0) ed.setNmPerPx(v); }} />
           </label>
-          <label className="num" style={{ width: 90 }}>
-            <span>碎片門檻 px</span>
+          <label className="num" style={{ width: 96 }}>
+            <span>忽略小色塊</span>
             <input type="number" step={1} min={0} value={minPx} onChange={(e) => setMinPx(Math.max(0, +e.target.value))} />
           </label>
           <button
-            onClick={() => segment(source.current ?? { width: imported.width, height: imported.height, data: imported.original })}
+            onClick={() => segment(source.current?.img ?? { width: imported.width, height: imported.height, data: imported.original }, source.current?.name ?? imported.source)}
             disabled={busy}
           >
-            重新分割
+            重新分區
           </button>
         </div>
-        <small className="dim">載入時不做色彩管理；比例只影響顯示的 nm。小於門檻的色塊會併入鄰居（設 0 表示全部保留）。</small>
+        <small className="dim">
+          比例只影響畫面上顯示的 nm，不影響輸出。面積小於「忽略小色塊」像素數的色塊會併進旁邊的區域（填 0 表示全部保留），改完按「重新分區」。
+        </small>
       </Section>
 
       <Section title="怎麼操作">
-        <table className="keys">
-          <tbody>
-            {KEYS.map(([k, v]) => (
-              <tr key={k}>
-                <td>{k}</td>
-                <td>{v}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="help">
+          {HELP.map(([group, items]) => (
+            <div key={group}>
+              <h4>{group}</h4>
+              <dl>
+                {items.map(([k, v]) => (
+                  <div key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ))}
+        </div>
       </Section>
     </aside>
   );
