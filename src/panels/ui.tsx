@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
-export const fmt = (v: number) => (Math.abs(v) < 0.05 ? '0.0' : v.toFixed(1));
-
 export function Section({ title, right, children }: { title: string; right?: ReactNode; children: ReactNode }) {
   return (
     <section className="sec">
@@ -16,23 +14,21 @@ export function Section({ title, right, children }: { title: string; right?: Rea
 }
 
 /** 數值輸入：Enter 或失焦才送出 */
-export function NumField({ label, value, onChange, step = 1, width }: { label: string; value: number; onChange: (v: number) => void; step?: number; width?: number }) {
-  const [text, setText] = useState(fmt(value));
-  useEffect(() => setText(fmt(value)), [value]);
-  const send = () => {
-    const v = parseFloat(text);
-    if (Number.isFinite(v) && v !== value) onChange(v);
-    else setText(fmt(value));
-  };
+export function NumField({ label, value, onChange, step = 0.1, w }: { label: string; value: number; onChange: (v: number) => void; step?: number; w?: number }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
   return (
-    <label className="num" style={width ? { width } : undefined}>
-      {label}
+    <label className="num" style={w ? { width: w } : undefined}>
+      <span>{label}</span>
       <input
         type="number"
         step={step}
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onBlur={send}
+        onBlur={() => {
+          const v = parseFloat(text);
+          if (Number.isFinite(v) && v !== value) onChange(v);
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         }}
@@ -43,11 +39,11 @@ export function NumField({ label, value, onChange, step = 1, width }: { label: s
 
 /** 現值 + 相對基準的 Δ 小字 */
 export function DeltaCell({ now, before }: { now: number; before?: number }) {
-  const d = before === undefined || !Number.isFinite(before) ? 0 : now - before;
+  const d = before === undefined ? 0 : Math.round((now - before) * 10) / 10;
   return (
     <span className="cell">
-      {fmt(now)}
-      {Math.abs(d) >= 0.05 && <small className={d > 0 ? 'up' : 'dn'}>{d > 0 ? '+' : ''}{d.toFixed(1)}</small>}
+      {now.toFixed(1)}
+      {before !== undefined && d !== 0 && <small className={d > 0 ? 'up' : 'dn'}>{d > 0 ? '+' : '−'}{Math.abs(d).toFixed(1)}</small>}
     </span>
   );
 }
