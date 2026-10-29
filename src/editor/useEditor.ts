@@ -85,7 +85,10 @@ export function useEditor() {
   const [panMode, setPanMode] = useState(false);
   const [view, setView] = useState<View>({ s: 1, tx: 0, ty: 0 });
   const [canvas, setCanvas] = useState<Size>({ w: 600, h: 500 });
-  const [menu, setMenu] = useState<{ region: string; x: number; y: number } | null>(null);
+  /** 右鍵選單：kind 決定選單內容，x/y 為畫布內座標 */
+  const [menu, setMenu] = useState<{ kind: 'region' | 'vertex' | 'edge'; region: string; x: number; y: number } | null>(null);
+  /** 拖節點時：smooth = 到左右節點之間的線順著動；single = 只動這一點（Shift 暫時切換） */
+  const [falloffMode, setFalloffMode] = useState<'smooth' | 'single'>('smooth');
   const edges = useMemo(() => edgesOf(model), [model]);
   const handleSet = useMemo(() => new Set(model.handles), [model.handles]);
   const edgeByKey = useMemo(() => new Map<string, Edge>(edges.map((e) => [e.key, e])), [edges]);
@@ -106,6 +109,7 @@ export function useEditor() {
   const baselineRef = useRef(baseline); baselineRef.current = baseline;
   const mirrorRef = useRef(mirror); mirrorRef.current = mirror;
   const followRef = useRef(follow); followRef.current = follow;
+  const falloffRef = useRef(falloffMode); falloffRef.current = falloffMode;
 
   const setLive = useCallback((m: Model) => {
     modelRef.current = m;
@@ -114,8 +118,9 @@ export function useEditor() {
 
   /** 參數操作：沒有基準就先記錄，再推歷史、清 future */
   const commit = useCallback((m: Model) => {
-    if (!baselineRef.current) patch(() => ({ baseline: { model: modelRef.current, label: '操作前', pinned: false } }));
+    // 先取出改動前的模型：patch 的 updater 會延後執行，那時 modelRef 已經是新的
     const prev = modelRef.current;
+    if (!baselineRef.current) patch(() => ({ baseline: { model: prev, label: '操作前', pinned: false } }));
     modelRef.current = m;
     patch((s) => ({ model: m, history: [...s.history.slice(-HISTORY_MAX), prev], future: [] }));
   }, [patch]);
@@ -262,7 +267,8 @@ export function useEditor() {
   }, []);
 
   const markBaseline = useCallback(() => {
-    if (!baselineRef.current?.pinned) patch(() => ({ baseline: { model: modelRef.current, label: '拖拉前', pinned: false } }));
+    const before = modelRef.current;
+    if (!baselineRef.current?.pinned) patch(() => ({ baseline: { model: before, label: '拖拉前', pinned: false } }));
   }, [patch]);
 
   const startMove = useCallback((g: Omit<Extract<Gesture, { kind: 'move' }>, 'kind' | 'startModel' | 'cur' | 'moved'>) => {
@@ -383,7 +389,8 @@ export function useEditor() {
     const ids = g.detach ? ringVertices(base, g.regionIds) : g.vertexIds;
     // 拖節點：與左右節點之間的輪廓按比例跟著走（左右節點不動）；按住 Shift 只動這一點
     const anchors = new Set(base.handles);
-    const weights = g.falloff && !shiftRef.current ? falloffWeights(base, ids, (id) => anchors.has(id)) : undefined;
+    const smooth = (falloffRef.current === 'smooth') !== shiftRef.current;
+    const weights = g.falloff && smooth ? falloffWeights(base, ids, (id) => anchors.has(id)) : undefined;
     const { disp, layers, blocked } = resolveDisp(base, ids, d, g.detach, weights);
     setFollowInfo({ layers, blocked });
     const next = { ...g, base, cur: at, moved: true };
@@ -437,7 +444,7 @@ export function useEditor() {
       : vertexSelRef.current.length ? vertexSelRef.current : edgeGroupVertices(edgeSelRef.current);
     if (!ids.length) return;
     const anchors = new Set(base.handles);
-    const weights = vertexSelRef.current.length && !whole ? falloffWeights(base, ids, (id) => anchors.has(id)) : undefined;
+    const weights = vertexSelRef.current.length && !whole && falloffRef.current === 'smooth' ? falloffWeights(base, ids, (id) => anchors.has(id)) : undefined;
     const { disp, layers, blocked } = resolveDisp(base, ids, [dx, dy], whole, weights);
     setFollowInfo({ layers, blocked });
     commit(clampToWorld(moveVertices(base, disp)));
@@ -517,6 +524,49 @@ export function useEditor() {
     setMenu(null);
   }, [commit]);
 
+  const sendToBack = useCallback((ids?: string[]) => {
+    const sel = new Set(ids ?? regionSelRef.current);
+    if (!sel.size) return;
+    const m = modelRef.current;
+    commit({ ...m, regions: [...m.regions.filter((r) => sel.has(r.id)), ...m.regions.filter((r) => !sel.has(r.id))] });
+    setMenu(null);
+  }, [commit]);
+
+  /** 從清單選區域：set 取代、toggle 切換、add 加入 */
+  const selectRegions = useCallback((ids: string[], how: 'set' | 'toggle' | 'add' = 'set') => {
+    setRegionSel((cur) => {
+      if (how === 'set') return ids;
+      if (how === 'add') return [...new Set([...cur, ...ids])];
+      const all = ids.every((id) => cur.includes(id));
+      return all ? cur.filter((id) => !ids.includes(id)) : [...new Set([...cur, ...ids])];
+    });
+    setEdgeSel([]);
+    setVertexSel([]);
+  }, []);
+
+  /** 節點在原圖上的位置（新增的節點用 ox/oy，分離出來的用 src） */
+  const originalPos = useCallback((id: string): XY | null => {
+    const v = modelRef.current.vertices[id];
+    if (!v) return null;
+    if (v.ox !== undefined && v.oy !== undefined) return [v.ox, v.oy];
+    const o = importedRef.current.model.vertices[v.src ?? id];
+    return o ? [o.x, o.y] : null;
+  }, []);
+
+  /** 已選的單一節點移到座標 (x, y)；規則同方向鍵（含順著動） */
+  const moveNodeTo = useCallback((x: number, y: number) => {
+    const id = vertexSelRef.current[0];
+    const v = id && modelRef.current.vertices[id];
+    if (!v) return;
+    nudge(Math.round(x) - v.x, Math.round(y) - v.y);
+  }, [nudge]);
+
+  const resetNode = useCallback(() => {
+    const id = vertexSelRef.current[0];
+    const o = id ? originalPos(id) : null;
+    if (o) moveNodeTo(o[0], o[1]);
+  }, [originalPos, moveNodeTo]);
+
   const undo = useCallback(() => {
     patch((s) => {
       if (!s.history.length) return {};
@@ -546,17 +596,30 @@ export function useEditor() {
     setTimeout(() => fit(), 0);
   }, [commit, fit, patch, clearSel]);
 
-  const pinBaseline = useCallback(() => patch(() => ({ baseline: { model: modelRef.current, label: '釘選基準', pinned: true } })), [patch]);
+  const pinBaseline = useCallback(() => {
+    const now = modelRef.current;
+    patch(() => ({ baseline: { model: now, label: '設定的基準', pinned: true } }));
+  }, [patch]);
+  const baselineOriginal = useCallback(() => patch((s) => ({ baseline: { model: s.imported.model, label: '原圖', pinned: true } })), [patch]);
   const clearBaseline = useCallback(() => patch(() => ({ baseline: null })), [patch]);
 
-  /** 右鍵：點到未選的區域就改選它，再開材質選單 */
-  const openMenu = useCallback((region: string, x: number, y: number) => {
-    if (!regionSelRef.current.includes(region)) {
-      setRegionSel([region]);
+  /** 右鍵：點到節點就選節點、點到邊就選那段邊、點到未選的區域就改選它，再開選單 */
+  const openMenu = useCallback((hit: Hit, x: number, y: number) => {
+    if (hit.kind === 'none') return;
+    const region = hit.kind === 'region' ? hit.id : hit.region;
+    if (!regionSelRef.current.includes(region)) setRegionSel(hit.kind === 'region' ? [region] : [...regionSelRef.current, region]);
+    if (hit.kind === 'vertex') {
+      if (!vertexSelRef.current.includes(hit.id)) setVertexSel([hit.id]);
+      setEdgeSel([]);
+    } else if (hit.kind === 'edge') {
+      if (!hit.group.every((k) => edgeSelRef.current.includes(k))) setEdgeSel(hit.group);
+      setEdgeOwner(hit.region);
+      setVertexSel([]);
+    } else if (!regionSelRef.current.includes(region)) {
       setEdgeSel([]);
       setVertexSel([]);
     }
-    setMenu({ region, x, y });
+    setMenu({ kind: hit.kind, region, x, y });
   }, []);
 
   // ---------- 鍵盤 ----------
@@ -622,9 +685,10 @@ export function useEditor() {
 
   return {
     cut, setCut, imported, loadImage, setNmPerPx, nmPerPx: imported.nmPerPx, materials, model, edges, edgeByKey,
-    regionSel, edgeSel, vertexSel, edgeOwner, hover, handleSet, addNodeAt, deleteNodes, hold, activeIds,
-    mirror, setMirror, follow, setFollow, followInfo,
-    history, future, baseline, pinBaseline, clearBaseline,
+    cuts, regionSel, edgeSel, vertexSel, edgeOwner, hover, handleSet, addNodeAt, deleteNodes, hold, activeIds,
+    mirror, setMirror, follow, setFollow, followInfo, falloffMode, setFalloffMode,
+    history, future, baseline, pinBaseline, clearBaseline, baselineOriginal,
+    selectRegions, originalPos, moveNodeTo, resetNode, sendToBack,
     delta, box, dragging: gesture?.kind === 'move' && gesture.moved,
     view, setView, canvas, setCanvasSize, fit, zoomAt, setZoom, panBy, panMode, setPanMode,
     menu, setMenu, openMenu,

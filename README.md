@@ -1,5 +1,7 @@
 # TCAD 剖面編輯器 Demo（PNG 進、PNG 出，聰明游標）
 
+介面使用 [Ant Design 5](https://ant.design)（預設主題，主色 #1677ff），版面依 [v4 介面設計](https://claude.ai/artifact/88TBoxLMjXJMCNhqqrRSuF)。
+
 依[實作計畫 v3](https://claude.ai/artifact/KqhJMem6XE65TePBWxN1J5) 與 [prototype v3](https://claude.ai/artifact/6YygUuSbEYrrVZFYRdNcwm) 實作的展示用頁面：載入 TCAD 輸出的剖面 PNG，自動分割成區域，在圖上編輯，輸出一張尺寸與輸入完全相同的 PNG。不接宿主、不含測試。
 
 ```bash
@@ -28,14 +30,22 @@ npm run dev     # 開 http://localhost:5173
 - **材質名稱**：顏色與已知色票幾乎相同才套名稱，否則顯示「材質 n」；材質面板雙擊可改名，區域名稱跟著改。
 - **其他**：浮動工具列（設 VOID、移到最上層、往外推、四方向 1 px）、相異像素標紅、區域名稱、Spec Preview 與基準差異、底圖切換（原圖／輸出／無）、縮放 1:1 / 8× / 適合視窗、平移。
 
+## 介面
+
+- **頂端列**：剖面方向（X / Y / Z）、檔名、復原／重做、檢視（編輯／前後比對／原圖）、上傳 PNG、匯出（PNG、材質編號圖）、操作說明。
+- **左欄**：依材質分組的區域清單，可搜尋、可收合；點區域選取（Shift 加選、Ctrl 切換），點材質名稱選整組，筆形按鈕改材質名稱；只有一個區域的材質直接顯示該區域。
+- **畫布**：選取後外框旁出現浮動工具列（換材質、設為 VOID、移動…、往外推…、刪除節點）；右鍵選單依點到區域／節點／邊給不同項目；「移動…」「往外推…」開輸入小窗；右下角縮放；左下角操作提示與拖拉中的狀態。
+- **右欄**：「屬性」依選取內容顯示——一個區域：寬高與位置四格（px 與 nm，和比較基準不同的格子標橘色）、輸入 Δx / Δy 移動、材質、排列；多個區域：完整尺寸表＋平均列（不另外捲動）；節點：直接填 X / Y、拉動方式、刪除與回到原位；邊：總長、往外推、移動。「改動」：改動像素、改了哪些區域（點了選取）、各材質面積、輸出檢查、匯出。「顯示」：紅框、區域名稱、上色深淺、編輯方式、比例、回填材質。
+- **第一次使用**：上傳頁（三個方向的槽、拖放上傳、載入設定、用範例試試看）；之後「上傳 PNG」以對話框開啟同一個畫面，也可重新分區。
+
 ## 結構
 
 ```
 src/
-  model/    types、geometry、ops（moveVertices、clampToWorld、detachRegions、insertVertexOnEdge、insertBump）、
-            drag（isCorner、smoothEdgeGroup、propagateLayers、violates）
-  raster/   quantize、components、chains（邊界鏈 → Model + 原始輪廓）、importRaster、exportRaster、demo（三張範例圖）
+  model/    types、geometry、ops、drag（isCorner、smoothEdgeGroup、propagateLayers、violates、outwardShifts、falloffWeights）
+  raster/   quantize、components、chains（邊界鏈 → Model + 原始輪廓 + 預設節點）、importRaster、exportRaster、nodes（新增節點）、demo
   editor/   useEditor（三槽狀態、聰明游標、手勢、選取、基準、Undo）、mirror、view
-  canvas/   RasterUnderlay（底圖 + 相異疊圖）、SectionCanvas（SVG 編輯層、浮動工具列、右鍵選單）
-  panels/   LeftPanel、RightPanels
+  canvas/   RasterUnderlay（底圖 + 相異框線）、SectionCanvas（SVG 編輯層、浮動工具列、右鍵選單、移動面板、前後比對）
+  layout/   HeaderBar、RegionList、Inspector、ChangesTab、DisplayTab、UploadPanel、HelpDrawer
+  ui/       MoveForm（移動／往外推輸入）、Stat、Swatch、download
 ```

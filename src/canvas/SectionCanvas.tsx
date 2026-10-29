@@ -1,3 +1,6 @@
+import { CompressOutlined, DeleteOutlined, DragOutlined, MinusOutlined, MoreOutlined, PlusCircleOutlined, PlusOutlined, VerticalAlignTopOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons';
+import { Button, Divider, Dropdown, Menu, Tooltip, Typography } from 'antd';
+import type { MenuProps } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as RPointerEvent } from 'react';
 import type { Editor } from '../editor/useEditor';
@@ -8,11 +11,13 @@ import type { XY } from '../model/types';
 import type { ExportResult } from '../raster/exportRaster';
 import { exactRing, materialOf, segmentPts } from '../raster/exportRaster';
 import { VOID_ID } from '../raster/importRaster';
+import { MoveForm, PushForm } from '../ui/MoveForm';
+import { Swatch } from '../ui/Swatch';
 import { RasterUnderlay } from './RasterUnderlay';
 import type { Underlay } from './RasterUnderlay';
 
-const ACCENT = '#1F5EFF';
-const HOVER = '#F59E0B';
+const ACCENT = '#1677ff';
+const HOVER = '#fa8c16';
 const MONO = 'ui-monospace, Menlo, monospace';
 
 /** 標籤位置：在 12 條水平掃描線中找最寬、且上下各半個字高仍在多邊形內的區段 */
@@ -39,15 +44,18 @@ function labelAnchor(pts: XY[], minW: number, textH: number): XY | null {
   return best?.p ?? null;
 }
 
+/** 浮在畫布上的小面板（移動／往外推），位置為畫布內座標 */
+type Panel = { kind: 'move' | 'push'; x: number; y: number };
+
 export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, showLabels }: {
   ed: Editor; underlay: Underlay; result: ExportResult; overlayAlpha: number; showDiff: boolean; showLabels: boolean;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 600, h: 500 });
-  const [pushPx, setPushPx] = useState(2);
   const [cursorPt, setCursorPt] = useState<XY | null>(null); // 前後比對時，左邊原圖上同步的十字
   const [peek, setPeek] = useState(false); // 按住 B 暫時看原圖
+  const [panel, setPanel] = useState<Panel | null>(null);
   const pan = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
   const spaceDown = useRef(false);
 
@@ -84,6 +92,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
         e.preventDefault();
       }
       if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey) setPeek(true);
+      if (e.key === 'Escape') setPanel(null);
     };
     const up = (e: KeyboardEvent) => {
       if (e.code === 'Space') spaceDown.current = false;
@@ -96,6 +105,12 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
       window.removeEventListener('keyup', up);
     };
   }, []);
+
+  // 選取清空時收起面板
+  const anySel = ed.regionSel.length + ed.edgeSel.length + ed.vertexSel.length > 0;
+  useEffect(() => {
+    if (!anySel) setPanel(null);
+  }, [anySel]);
 
   const { model, view, hover } = ed;
   const { w, h } = size;
@@ -118,17 +133,14 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
 
   const onDown = (e: RPointerEvent) => {
     svgRef.current?.setPointerCapture(e.pointerId);
+    setPanel(null);
     if (isPan(e)) {
       pan.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty };
       return;
     }
     if (e.button === 2) {
-      const hit = ed.hitTest(pxAt(e));
-      const region = hit.kind === 'region' ? hit.id : hit.kind === 'none' ? null : hit.region;
-      if (region) {
-        const p = local(e);
-        ed.openMenu(region, p.x, p.y);
-      }
+      const p = local(e);
+      ed.openMenu(ed.hitTest(pxAt(e)), p.x, p.y);
       return;
     }
     if (e.button === 0) ed.pointerDown(pxAt(e), { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
@@ -143,7 +155,7 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
     ed.pointerMove(at);
   };
 
-  // 游標：角 → 十字、邊 → 垂直於邊的雙箭頭、區域 → 四箭頭
+  // 游標：節點 → 十字、邊 → 垂直於邊的雙箭頭、區域 → 四箭頭
   const cursor = ed.panMode ? 'grab'
     : hover.kind === 'vertex' ? 'crosshair'
     : hover.kind === 'edge' ? (() => {
@@ -175,16 +187,17 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
     const polys = model.regions.filter((r) => regionSel.has(r.id)).map((r) => polyOf(model, r));
     return polys.length ? bboxOf(polys.flat()) : null;
   })();
-  const handlesSelected = ed.edgeSel.length || ed.vertexSel.length;
-  const floatPos = selBox
+  const handlesSelected = ed.edgeSel.length > 0 || ed.vertexSel.length > 0;
+  // 浮動工具列：已選外框右上；靠近右緣時改貼齊右邊
+  const barPos = selBox
     ? (() => {
       const [x, y] = P(selBox.x1, selBox.y0);
-      const top = Math.max(4, Math.min(h - 40, y - 44));
-      // 工具列約 460 px 寬；靠近右緣時改貼齊右邊，不要超出畫布
-      return x + 12 + 460 > w ? { right: 8, top } : { left: Math.max(4, x + 12), top };
+      const top = Math.max(8, Math.min(h - 48, y - 52));
+      return x + 12 + 400 > w ? { right: 12, top } : { left: Math.max(8, x + 12), top };
     })()
     : null;
 
+  const barX = barPos?.left ?? w - 412;
   // 節點：只畫已選或游標所在區域的節點；角畫方塊、其他畫圓點；按住 V 顯示全部輪廓點
   const handles = new Map<string, boolean>();
   for (const r of model.regions) {
@@ -196,202 +209,274 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
       });
   }
 
+  const sel = ed.regionSel;
+  const curMat = sel.length ? materialOf(ed.materials, model.regions.find((r) => r.id === sel[0])!.material) : null;
+  const materialItems: MenuProps['items'] = ed.materials.map((m) => ({
+    key: m.id,
+    label: m.name,
+    icon: <span className="anticon"><Swatch fill={m.fill} isVoid={m.isVoid} /></span>,
+    onClick: () => ed.setMaterial(m.id),
+  }));
+  const openPanel = (kind: Panel['kind'], x: number, y: number) => {
+    ed.setMenu(null);
+    setPanel({ kind, x: Math.min(w - 300, Math.max(8, x)), y: Math.min(h - 220, Math.max(8, y)) });
+  };
+
+  // 右鍵選單：依點到的東西給不同項目
+  const menuItems: MenuProps['items'] = (() => {
+    const m = ed.menu;
+    if (!m) return [];
+    const move = { key: 'move', icon: <DragOutlined />, label: '移動到…', onClick: () => openPanel('move', m.x, m.y) };
+    const mat = { key: 'mat', icon: curMat ? <span className="anticon"><Swatch fill={curMat.fill} isVoid={curMat.isVoid} /></span> : undefined, label: '換材質', children: materialItems };
+    const toVoid = { key: 'void', label: '設為 VOID', onClick: () => ed.setMaterial(VOID_ID) };
+    if (m.kind === 'vertex')
+      return [move, { key: 'del', icon: <DeleteOutlined />, danger: true, label: '刪除節點（Delete）', onClick: () => { ed.deleteNodes(); ed.setMenu(null); } }, { type: 'divider' }, mat, toVoid];
+    if (m.kind === 'edge')
+      return [
+        { key: 'push', icon: <CompressOutlined />, label: '往外推…', onClick: () => openPanel('push', m.x, m.y) },
+        move,
+        { key: 'add', icon: <PlusCircleOutlined />, label: '在這裡新增節點', onClick: () => { ed.addNodeAt({ x: (m.x - view.tx) / view.s, y: (m.y - view.ty) / view.s }); ed.setMenu(null); } },
+        { type: 'divider' },
+        mat,
+      ];
+    return [
+      move, mat, toVoid, { type: 'divider' },
+      { key: 'front', icon: <VerticalAlignTopOutlined />, label: '移到最上層', onClick: () => ed.bringToFront() },
+      { key: 'back', icon: <VerticalAlignBottomOutlined />, label: '移到最下層', onClick: () => ed.sendToBack() },
+    ];
+  })();
+  const menuTitle = ed.menu ? `${model.regions.find((r) => r.id === ed.menu!.region)?.label ?? ''}${ed.menu.kind === 'vertex' ? ' · 節點' : ed.menu.kind === 'edge' ? ' · 邊' : ''}` : '';
+
+  const hint = ed.delta
+    ? `Δx ${signed(ed.delta.dx)} px、Δy ${signed(ed.delta.dy)} px${ed.followInfo.layers ? `｜外面 ${ed.followInfo.layers} 層一起推` : ''}${ed.followInfo.blocked ? '｜已停住（再推會穿過旁邊的層）' : ''}`
+    : ed.hold === 'V' ? '顯示全部輪廓點（放開 V 回到節點）'
+    : '拖曳區域搬移 · 拖曳邊推移 · 雙擊邊新增節點 · 右鍵更多';
+
   return (
     <div className="canvas-area">
-    {underlay === 'compare' && <OriginalPane ed={ed} diffMask={result.diffMask} showDiff={showDiff} cursorPt={cursorPt} />}
-    <div ref={wrapRef} className="canvas-wrap" style={{ cursor }} onPointerLeave={() => setCursorPt(null)}>
-      {underlay === 'compare' && <span className="pane-tag">輸出（在這邊編輯）</span>}
-      <RasterUnderlay imported={ed.imported} output={result.data} diffMask={result.diffMask} showDiff={showDiff} underlay={peek ? 'original' : underlay} view={view} w={w} h={h} />
-      <svg
-        ref={svgRef}
-        width={w}
-        height={h}
-        style={{ touchAction: 'none', display: 'block', position: 'relative' }}
-        onPointerDown={onDown}
-        onPointerMove={onMove}
-        onPointerUp={() => (pan.current = null)}
-        onDoubleClick={(e) => ed.addNodeAt(pxAt(e))}
-        onContextMenu={(e) => e.preventDefault()}
-      >
-        <rect width={w} height={h} fill={underlay === 'none' ? '#F7F8FA' : 'transparent'} />
-
-        {/* 格線與尺規（nm） */}
-        <g pointerEvents="none">
-          {gx.map((x) => {
-            const [px] = P(x, 0);
-            return <line key={'gx' + x} x1={px} y1={0} x2={px} y2={h} stroke="#9AA4B0" strokeOpacity={underlay === 'none' ? 0.35 : 0.25} />;
-          })}
-          {gy.map((y) => {
-            const [, py] = P(0, y);
-            return <line key={'gy' + y} x1={0} y1={py} x2={w} y2={py} stroke="#9AA4B0" strokeOpacity={underlay === 'none' ? 0.35 : 0.25} />;
-          })}
-          <rect x={0} y={0} width={w} height={16} fill="#EEF1F5" opacity={0.95} />
-          <rect x={0} y={0} width={36} height={h} fill="#EEF1F5" opacity={0.95} />
-          {gx.map((x) => {
-            const [px] = P(x, 0);
-            return px > 36 ? <text key={'tx' + x} x={px} y={11} fontSize={9.5} textAnchor="middle" fill="#555">{nmLabel(x)}</text> : null;
-          })}
-          {gy.map((y) => {
-            const [, py] = P(0, y);
-            return py > 16 ? <text key={'ty' + y} x={33} y={py + 3.5} fontSize={9.5} textAnchor="end" fill="#555">{nmLabel(y)}</text> : null;
-          })}
-          <text x={2} y={11} fontSize={9} fill="#888">nm</text>
-        </g>
-
-        {/* 區域 */}
-        {model.regions.map((r) => {
-          const sel = regionSel.has(r.id), hov = hoverRegion === r.id, act = ed.activeIds.has(r.id);
-          const mat = materialOf(ed.materials, r.material);
-          const d = shapes.get(r.id)!.map((ring) => 'M' + ring.map(([x, y]) => P(x, y).join(',')).join('L') + 'Z').join(' ');
-          return (
-            <path
-              key={r.id}
-              d={d}
-              fillRule="evenodd"
-              fill={mat.isVoid ? 'url(#voidHatch)' : mat.fill}
-              fillOpacity={mat.isVoid ? 0.9 : hov ? Math.min(1, overlayAlpha + 0.2) : overlayAlpha}
-              stroke={sel ? ACCENT : act ? '#6B8CFF' : '#4b4b4b'}
-              strokeWidth={sel ? 2.5 : act ? 1.5 : 1}
-              strokeLinejoin="round"
-              pointerEvents="none"
-            />
-          );
-        })}
-
-        {showLabels && (
-          <g pointerEvents="none">
-            {model.regions.map((r) => {
-              const at = labelAnchor(polyOf(model, r), (r.label.length * 7 + 8) / view.s, 16 / view.s);
-              if (!at) return null;
-              const [x, y] = P(...at);
-              return <text key={r.id} x={x} y={y + 3.5} fontSize={10.5} textAnchor="middle" fill="#222">{r.label}</text>;
-            })}
-          </g>
+      {underlay === 'compare' && <OriginalPane ed={ed} diffMask={result.diffMask} showDiff={showDiff} cursorPt={cursorPt} />}
+      <div className="pane">
+        {underlay === 'compare' && (
+          <div className="pane-head"><b>改動後</b><Typography.Text style={{ color: ACCENT, fontSize: 12 }}>編輯中</Typography.Text></div>
         )}
-
-        {/* 把手：只在已選或游標所在的區域 */}
-        <g pointerEvents="none">
-          {ed.edges.filter((e) => e.regions.some((r) => ed.activeIds.has(r))).map((e) => {
-            const on = edgeSel.has(e.key), hov = hoverEdges.has(e.key);
-            if (!on && !hov) return null;
-            const pts = [...segmentPts(model, ed.imported, e.a, e.b), [model.vertices[e.b].x, model.vertices[e.b].y] as XY];
-            return <polyline key={e.key} points={pts.map(([x, y]) => P(x, y).join(',')).join(' ')} fill="none" stroke={on ? ACCENT : HOVER} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" />;
-          })}
-          {[...handles].map(([id, corner]) => {
-            const v = model.vertices[id];
-            const [cx, cy] = P(v.x, v.y);
-            const on = vertexSel.has(id), hov = hoverVertex === id;
-            const r = (corner ? 4.5 : 3.5) + (hov ? 2 : on ? 1 : 0);
-            const fill = on ? ACCENT : hov ? HOVER : '#fff';
-            return corner
-              ? <rect key={id} x={cx - r} y={cy - r} width={2 * r} height={2 * r} fill={fill} stroke={ACCENT} strokeWidth={1.5} />
-              : <circle key={id} cx={cx} cy={cy} r={r} fill={fill} stroke={ACCENT} strokeWidth={1.5} />;
-          })}
-        </g>
-
-        {/* 已選區域外框尺寸 */}
-        {selBox && !handlesSelected && (() => {
-          const [x0, y0] = P(selBox.x0, selBox.y0);
-          const [x1, y1] = P(selBox.x1, selBox.y1);
-          const W = selBox.x1 - selBox.x0, H = selBox.y1 - selBox.y0;
-          return (
-            <g pointerEvents="none" fontSize={10.5} fontFamily={MONO} fill={ACCENT}>
-              <line x1={x0} y1={y1 + 14} x2={x1} y2={y1 + 14} stroke={ACCENT} markerStart="url(#arrS)" markerEnd="url(#arrE)" />
-              <rect x={(x0 + x1) / 2 - 52} y={y1 + 18} width={104} height={14} rx={3} fill="#fff" fillOpacity={0.85} />
-              <text x={(x0 + x1) / 2} y={y1 + 29} textAnchor="middle">W {W} px · {(W * k).toFixed(1)} nm</text>
-              <line x1={x1 + 14} y1={y0} x2={x1 + 14} y2={y1} stroke={ACCENT} markerStart="url(#arrS)" markerEnd="url(#arrE)" />
-              <rect x={x1 + 18} y={(y0 + y1) / 2 - 7} width={104} height={14} rx={3} fill="#fff" fillOpacity={0.85} />
-              <text x={x1 + 22} y={(y0 + y1) / 2 + 3.5}>H {H} px · {(H * k).toFixed(1)} nm</text>
-            </g>
-          );
-        })()}
-
-        <defs>
-          <pattern id="voidHatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-            <rect width="8" height="8" fill="#111" fillOpacity="0.15" />
-            <line x1="0" y1="0" x2="0" y2="8" stroke="#111" strokeWidth="2" />
-          </pattern>
-          <marker id="arrS" markerWidth="6" markerHeight="6" refX="1" refY="3" orient="auto">
-            <path d="M6,0 L0,3 L6,6" fill="none" stroke={ACCENT} />
-          </marker>
-          <marker id="arrE" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L6,3 L0,6" fill="none" stroke={ACCENT} />
-          </marker>
-        </defs>
-
-        {ed.box && (() => {
-          const [x0, y0] = P(ed.box.x0, ed.box.y0);
-          const [x1, y1] = P(ed.box.x1, ed.box.y1);
-          return <rect x={x0} y={y0} width={x1 - x0} height={y1 - y0} stroke={ACCENT} strokeDasharray="4 3" fill="rgba(31,94,255,.08)" pointerEvents="none" />;
-        })()}
-
-        {/* Δ 標籤：px 與 nm */}
-        {ed.delta && (() => {
-          const d = ed.delta;
-          const [cx, cy] = P(d.cur.x, d.cur.y);
-          const lines = [
-            `Δx ${signed(d.dx)} px (${signed(d.dx * k, 1)} nm)   Δy ${signed(d.dy)} px (${signed(d.dy * k, 1)} nm)`,
-            d.normal !== null ? `往外 ${signed(d.normal, 1)} px (${signed(d.normal * k, 1)} nm)` : `位移 ${Math.hypot(d.dx, d.dy).toFixed(1)} px`,
-          ];
-          const bw = 310, bh = 40;
-          const x = Math.min(cx + 14, w - bw - 2), y = Math.max(2, cy - bh - 14);
-          return (
+        <div ref={wrapRef} className={'canvas-wrap' + (underlay === 'compare' ? ' editing' : '')} style={{ cursor }} onPointerLeave={() => setCursorPt(null)}>
+          <RasterUnderlay imported={ed.imported} output={result.data} diffMask={result.diffMask} showDiff={showDiff} underlay={peek ? 'original' : underlay} view={view} w={w} h={h} />
+          <svg
+            ref={svgRef}
+            width={w}
+            height={h}
+            style={{ touchAction: 'none', display: 'block', position: 'relative' }}
+            onPointerDown={onDown}
+            onPointerMove={onMove}
+            onPointerUp={() => (pan.current = null)}
+            onDoubleClick={(e) => ed.addNodeAt(pxAt(e))}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {/* 尺規（nm） */}
             <g pointerEvents="none">
-              <rect x={x} y={y} width={bw} height={bh} rx={4} fill="#111827" opacity={0.92} />
-              {lines.map((t, i) => <text key={i} x={x + 8} y={y + 16 + i * 15} fontSize={11.5} fill="#fde68a" fontFamily={MONO}>{t}</text>)}
+              {gx.map((x) => {
+                const [px] = P(x, 0);
+                return <line key={'gx' + x} x1={px} y1={0} x2={px} y2={h} stroke="#000" strokeOpacity={0.05} />;
+              })}
+              {gy.map((y) => {
+                const [, py] = P(0, y);
+                return <line key={'gy' + y} x1={0} y1={py} x2={w} y2={py} stroke="#000" strokeOpacity={0.05} />;
+              })}
+              <rect x={0} y={0} width={w} height={18} fill="#fafafa" />
+              <rect x={0} y={0} width={36} height={h} fill="#fafafa" />
+              <line x1={0} y1={18} x2={w} y2={18} stroke="#f0f0f0" />
+              <line x1={36} y1={0} x2={36} y2={h} stroke="#f0f0f0" />
+              {gx.map((x) => {
+                const [px] = P(x, 0);
+                return px > 40 ? <text key={'tx' + x} x={px} y={13} fontSize={10} textAnchor="middle" fill="#8c8c8c">{nmLabel(x)}</text> : null;
+              })}
+              {gy.map((y) => {
+                const [, py] = P(0, y);
+                return py > 24 ? <text key={'ty' + y} x={32} y={py + 3.5} fontSize={10} textAnchor="end" fill="#8c8c8c">{nmLabel(y)}</text> : null;
+              })}
+              <text x={6} y={13} fontSize={10} fill="#8c8c8c">nm</text>
             </g>
-          );
-        })()}
-      </svg>
 
-      {peek && <div className="peek">原圖（放開 B 回到輸出）</div>}
+            {/* 區域 */}
+            {model.regions.map((r) => {
+              const isSel = regionSel.has(r.id), hov = hoverRegion === r.id, act = ed.activeIds.has(r.id);
+              const mat = materialOf(ed.materials, r.material);
+              const d = shapes.get(r.id)!.map((ring) => 'M' + ring.map(([x, y]) => P(x, y).join(',')).join('L') + 'Z').join(' ');
+              return (
+                <path
+                  key={r.id}
+                  d={d}
+                  fillRule="evenodd"
+                  fill={mat.isVoid ? 'url(#voidHatch)' : mat.fill}
+                  fillOpacity={mat.isVoid ? 0.9 : hov ? Math.min(1, overlayAlpha + 0.2) : overlayAlpha}
+                  stroke={isSel ? ACCENT : act ? '#69b1ff' : '#595959'}
+                  strokeOpacity={isSel || act ? 1 : 0.6}
+                  strokeWidth={isSel ? 2 : act ? 1.5 : 0.8}
+                  strokeLinejoin="round"
+                  pointerEvents="none"
+                />
+              );
+            })}
 
-      {/* 浮動工具列：外框右上 */}
-      {floatPos && !ed.dragging && (
-        <div className="floatbar" style={floatPos} onPointerDown={(e) => e.stopPropagation()}>
-          {handlesSelected ? (
-            <>
-              <span className="dim">{ed.vertexSel.length ? `${ed.vertexSel.length} 個節點` : `${ed.edgeSel.length} 段邊`}</span>
-              {ed.vertexSel.length > 0 && <button onClick={ed.deleteNodes} title="不再當節點；形狀不變（Delete 鍵）">刪除節點</button>}
-              {ed.edgeSel.length > 0 && (
-                <span className="grp" title="每段邊沿自己的垂直方向推，遠離你點的那個區域；負值往內縮">
-                  {ed.edgeOwner ? `${model.regions.find((r) => r.id === ed.edgeOwner)?.label ?? ''} ` : ''}往外推
-                  <input type="number" value={pushPx} step={1} onChange={(e) => setPushPx(+e.target.value)} onKeyDown={(e) => e.key === 'Enter' && ed.pushOutward(pushPx)} />
-                  px
-                  <button onClick={() => ed.pushOutward(pushPx)}>套用</button>
-                </span>
+            {showLabels && (
+              <g pointerEvents="none">
+                {model.regions.map((r) => {
+                  const at = labelAnchor(polyOf(model, r), (r.label.length * 7 + 8) / view.s, 16 / view.s);
+                  if (!at) return null;
+                  const [x, y] = P(...at);
+                  return <text key={r.id} x={x} y={y + 3.5} fontSize={11} textAnchor="middle" fill="#1f1f1f">{r.label}</text>;
+                })}
+              </g>
+            )}
+
+            {/* 節點與邊：只在已選或游標所在的區域 */}
+            <g pointerEvents="none">
+              {ed.edges.filter((e) => e.regions.some((r) => ed.activeIds.has(r))).map((e) => {
+                const on = edgeSel.has(e.key), hov = hoverEdges.has(e.key);
+                if (!on && !hov) return null;
+                const pts = [...segmentPts(model, ed.imported, e.a, e.b), [model.vertices[e.b].x, model.vertices[e.b].y] as XY];
+                return <polyline key={e.key} points={pts.map(([x, y]) => P(x, y).join(',')).join(' ')} fill="none" stroke={on ? ACCENT : HOVER} strokeWidth={3.5} strokeLinecap="round" strokeLinejoin="round" />;
+              })}
+              {[...handles].map(([id, corner]) => {
+                const v = model.vertices[id];
+                const [cx, cy] = P(v.x, v.y);
+                const on = vertexSel.has(id), hov = hoverVertex === id;
+                const r = (corner ? 4 : 3.5) + (hov ? 1.5 : on ? 1 : 0);
+                const fill = on ? ACCENT : hov ? HOVER : '#fff';
+                return corner
+                  ? <rect key={id} x={cx - r} y={cy - r} width={2 * r} height={2 * r} rx={1} fill={fill} stroke={ACCENT} strokeWidth={1.5} />
+                  : <circle key={id} cx={cx} cy={cy} r={r} fill={fill} stroke={on ? '#fff' : ACCENT} strokeWidth={1.5} />;
+              })}
+            </g>
+
+            {/* 已選區域外框尺寸 */}
+            {selBox && !handlesSelected && !ed.dragging && (() => {
+              const [x0, y0] = P(selBox.x0, selBox.y0);
+              const [x1, y1] = P(selBox.x1, selBox.y1);
+              const W = selBox.x1 - selBox.x0, H = selBox.y1 - selBox.y0;
+              const chip = (x: number, y: number, text: string, anchor: 'middle' | 'start') => (
+                <g>
+                  <rect x={anchor === 'middle' ? x - 34 : x} y={y - 10} width={68} height={18} rx={4} fill={ACCENT} />
+                  <text x={anchor === 'middle' ? x : x + 34} y={y + 3} textAnchor="middle" fill="#fff">{text}</text>
+                </g>
+              );
+              return (
+                <g pointerEvents="none" fontSize={11} fontFamily={MONO}>
+                  <line x1={x0} y1={y1 + 12} x2={x1} y2={y1 + 12} stroke={ACCENT} />
+                  <line x1={x0} y1={y1 + 8} x2={x0} y2={y1 + 16} stroke={ACCENT} />
+                  <line x1={x1} y1={y1 + 8} x2={x1} y2={y1 + 16} stroke={ACCENT} />
+                  <line x1={x1 + 12} y1={y0} x2={x1 + 12} y2={y1} stroke={ACCENT} />
+                  <line x1={x1 + 8} y1={y0} x2={x1 + 16} y2={y0} stroke={ACCENT} />
+                  <line x1={x1 + 8} y1={y1} x2={x1 + 16} y2={y1} stroke={ACCENT} />
+                  {chip((x0 + x1) / 2, y1 + 28, `W ${W} px`, 'middle')}
+                  {chip(x1 + 20, (y0 + y1) / 2, `H ${H} px`, 'start')}
+                </g>
+              );
+            })()}
+
+            <defs>
+              <pattern id="voidHatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                <rect width="8" height="8" fill="#000" fillOpacity="0.15" />
+                <line x1="0" y1="0" x2="0" y2="8" stroke="#000" strokeWidth="2" />
+              </pattern>
+            </defs>
+
+            {ed.box && (() => {
+              const [x0, y0] = P(ed.box.x0, ed.box.y0);
+              const [x1, y1] = P(ed.box.x1, ed.box.y1);
+              return <rect x={x0} y={y0} width={x1 - x0} height={y1 - y0} stroke={ACCENT} strokeDasharray="4 3" fill="rgba(22,119,255,.08)" pointerEvents="none" />;
+            })()}
+
+            {/* 拖拉中的位移標籤 */}
+            {ed.delta && (() => {
+              const d = ed.delta;
+              const [cx, cy] = P(d.cur.x, d.cur.y);
+              const text = `${signed(d.dx)}, ${signed(d.dy)} px（${signed(d.dx * k, 1)}, ${signed(d.dy * k, 1)} nm）`;
+              const bw = text.length * 6.6 + 16;
+              const x = Math.min(cx + 14, w - bw - 4), y = Math.max(22, cy - 36);
+              return (
+                <g pointerEvents="none">
+                  <rect x={x} y={y} width={bw} height={24} rx={6} fill="rgba(0,0,0,.85)" />
+                  <text x={x + 8} y={y + 16} fontSize={12} fill="#fff" fontFamily={MONO}>{text}</text>
+                </g>
+              );
+            })()}
+          </svg>
+
+          {/* 浮動工具列 */}
+          {barPos && !ed.dragging && !ed.menu && !panel && (
+            <div className="floatbar" style={barPos} onPointerDown={(e) => e.stopPropagation()}>
+              {ed.vertexSel.length > 0 ? (
+                <>
+                  <span className="fb-label">{ed.vertexSel.length} 個節點</span>
+                  <Button type="text" size="small" icon={<DragOutlined />} onClick={() => openPanel('move', barX, barPos.top + 40)}>移動…</Button>
+                  <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={ed.deleteNodes}>刪除節點</Button>
+                </>
+              ) : ed.edgeSel.length > 0 ? (
+                <>
+                  <span className="fb-label">{ed.edgeSel.length} 段邊</span>
+                  <Button type="text" size="small" icon={<CompressOutlined />} onClick={() => openPanel('push', barX, barPos.top + 40)}>往外推…</Button>
+                  <Button type="text" size="small" icon={<DragOutlined />} onClick={() => openPanel('move', barX, barPos.top + 40)}>移動…</Button>
+                </>
+              ) : (
+                <>
+                  {sel.length > 1 && <span className="fb-label">{sel.length} 個區域</span>}
+                  <Dropdown menu={{ items: materialItems }} trigger={['click']}>
+                    <Button type="text" size="small">
+                      {curMat && <Swatch fill={curMat.fill} isVoid={curMat.isVoid} />}
+                      {curMat?.name}
+                    </Button>
+                  </Dropdown>
+                  <Divider type="vertical" style={{ margin: 0 }} />
+                  <Button type="text" size="small" onClick={() => ed.setMaterial(VOID_ID)}>設為 VOID</Button>
+                  <Button type="text" size="small" icon={<DragOutlined />} onClick={() => openPanel('move', barX, barPos.top + 40)}>移動…</Button>
+                  <Dropdown
+                    trigger={['click']}
+                    menu={{ items: [
+                      { key: 'front', icon: <VerticalAlignTopOutlined />, label: '移到最上層', onClick: () => ed.bringToFront() },
+                      { key: 'back', icon: <VerticalAlignBottomOutlined />, label: '移到最下層', onClick: () => ed.sendToBack() },
+                    ] }}
+                  >
+                    <Button type="text" size="small" icon={<MoreOutlined />} aria-label="更多" />
+                  </Dropdown>
+                </>
               )}
-            </>
-          ) : (
-            <>
-              <span className="dim">{ed.regionSel.length} 區域</span>
-              <button onClick={() => ed.setMaterial(VOID_ID)}>設為 VOID</button>
-              <button onClick={() => ed.bringToFront()}>移到最上層</button>
-            </>
+            </div>
           )}
-          <span className="dim sep">微移</span>
-          <button onClick={() => ed.nudge(0, -1)} title="↑ 1 px">↑</button>
-          <button onClick={() => ed.nudge(0, 1)} title="↓ 1 px">↓</button>
-          <button onClick={() => ed.nudge(-1, 0)} title="← 1 px">←</button>
-          <button onClick={() => ed.nudge(1, 0)} title="→ 1 px">→</button>
-        </div>
-      )}
 
-      {/* 右鍵材質選單 */}
-      {ed.menu && (
-        <div className="ctxmenu" style={{ left: Math.min(w - 190, ed.menu.x), top: Math.min(h - 300, ed.menu.y) }} onPointerDown={(e) => e.stopPropagation()}>
-          <div className="hd">{model.regions.find((r) => r.id === ed.menu!.region)?.label}　→ 材質</div>
-          {ed.materials.map((m) => (
-            <button key={m.id} onClick={() => ed.setMaterial(m.id, ed.regionSel.length ? ed.regionSel : [ed.menu!.region])}>
-              <span className="sw" style={{ background: m.fill }} />
-              {m.name}
-            </button>
-          ))}
-          <div className="sep" />
-          <button onClick={() => ed.bringToFront(ed.regionSel.length ? ed.regionSel : [ed.menu!.region])}>移到最上層</button>
+          {/* 右鍵選單 */}
+          {ed.menu && (
+            <div className="ctxmenu" style={{ left: Math.min(w - 230, ed.menu.x), top: Math.min(h - 320, ed.menu.y) }} onPointerDown={(e) => e.stopPropagation()}>
+              <div className="ctx-title">{menuTitle}</div>
+              <Menu items={menuItems} selectable={false} style={{ border: 0, minWidth: 220 }} />
+            </div>
+          )}
+
+          {/* 移動／往外推面板 */}
+          {panel && (
+            <div className="popcard" style={{ left: panel.x, top: panel.y }} onPointerDown={(e) => e.stopPropagation()}>
+              <div className="popcard-head">
+                <b>{panel.kind === 'push' ? '往外推' : ed.vertexSel.length ? '移動節點' : ed.edgeSel.length ? '移動邊' : '移動區域'}</b>
+                <Button type="text" size="small" onClick={() => setPanel(null)} aria-label="關閉">✕</Button>
+              </div>
+              {panel.kind === 'push' ? <PushForm ed={ed} onDone={() => setPanel(null)} /> : <MoveForm ed={ed} applyLabel="套用" onDone={() => setPanel(null)} />}
+            </div>
+          )}
+
+          {peek && <div className="peek">原圖（放開 B 回到輸出）</div>}
+
+          {(underlay !== 'compare' || ed.delta) && <div className={'hintbar' + (ed.delta ? ' hot' : '')}>{hint}</div>}
+
+          <div className="zoombar" onPointerDown={(e) => e.stopPropagation()}>
+            <Tooltip title="縮小（−）"><Button type="text" size="small" icon={<MinusOutlined />} onClick={() => ed.zoomAt(0.8)} aria-label="縮小" /></Tooltip>
+            <span className="zoom-val">{Math.round(view.s * 100)}%</span>
+            <Tooltip title="放大（+）"><Button type="text" size="small" icon={<PlusOutlined />} onClick={() => ed.zoomAt(1.25)} aria-label="放大" /></Tooltip>
+            <Divider type="vertical" style={{ margin: '0 4px' }} />
+            <Tooltip title="看整張圖（F）"><Button type="text" size="small" onClick={() => ed.fit()}>適合視窗</Button></Tooltip>
+            <Button type="text" size="small" onClick={() => ed.setZoom(1)}>1:1</Button>
+          </div>
         </div>
-      )}
-    </div>
+      </div>
     </div>
   );
 }
@@ -409,16 +494,18 @@ function OriginalPane({ ed, diffMask, showDiff, cursorPt }: { ed: Editor; diffMa
   const { view } = ed;
   const c = cursorPt && [cursorPt[0] * view.s + view.tx, cursorPt[1] * view.s + view.ty];
   return (
-    <div ref={ref} className="canvas-wrap readonly">
-      <span className="pane-tag">原圖</span>
-      <RasterUnderlay imported={ed.imported} output={ed.imported.original} diffMask={diffMask} showDiff={showDiff} underlay="original" view={view} w={size.w} h={size.h} />
-      {c && (
-        <svg width={size.w} height={size.h} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-          <line x1={c[0]} y1={0} x2={c[0]} y2={size.h} stroke="#111827" strokeOpacity={0.5} strokeDasharray="4 3" />
-          <line x1={0} y1={c[1]} x2={size.w} y2={c[1]} stroke="#111827" strokeOpacity={0.5} strokeDasharray="4 3" />
-          <circle cx={c[0]} cy={c[1]} r={5} fill="none" stroke="#111827" strokeWidth={1.5} />
-        </svg>
-      )}
+    <div className="pane">
+      <div className="pane-head"><b>原圖</b><Typography.Text type="secondary" style={{ fontSize: 12 }}>只能看</Typography.Text></div>
+      <div ref={ref} className="canvas-wrap readonly">
+        <RasterUnderlay imported={ed.imported} output={ed.imported.original} diffMask={diffMask} showDiff={showDiff} underlay="original" view={view} w={size.w} h={size.h} />
+        {c && (
+          <svg width={size.w} height={size.h} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+            <line x1={c[0]} y1={0} x2={c[0]} y2={size.h} stroke="#000" strokeOpacity={0.45} strokeDasharray="4 3" />
+            <line x1={0} y1={c[1]} x2={size.w} y2={c[1]} stroke="#000" strokeOpacity={0.45} strokeDasharray="4 3" />
+            <circle cx={c[0]} cy={c[1]} r={5} fill="none" stroke="#000" strokeWidth={1.5} />
+          </svg>
+        )}
+      </div>
     </div>
   );
 }
