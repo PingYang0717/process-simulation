@@ -7,7 +7,7 @@ import type { CutId, CutState, Edge, Imported, Model, XY } from '../model/types'
 import { demoX, demoY, demoZ } from '../raster/demo';
 import { importRaster } from '../raster/importRaster';
 import type { RasterImage } from '../model/types';
-import { counterparts } from './mirror';
+import { counterparts, mapPoint, nodeAt } from './mirror';
 import { MAX_S, MIN_S } from './view';
 import type { Size, View } from './view';
 
@@ -200,8 +200,11 @@ export function useEditor() {
           for (let i = 0; i < ring.length; i++) {
             const v = m.vertices[ring[i]];
             const d = d2(v.x, v.y);
-            if (d > SNAP_VERTEX ** 2 || (best && d >= best.d)) continue;
+            if (d > SNAP_VERTEX ** 2) continue;
             if (h !== 'V' && !handleSetRef.current.has(ring[i])) continue; // 只有節點能抓；按住 V 全部都能抓
+            // 同一個點在交界上屬於好幾個區域：優先算在已選的區域（多結構一起編輯時才對得上）
+            const prefer = best?.id === ring[i] && regionSelRef.current.includes(r.id) && !regionSelRef.current.includes(best.region);
+            if (best && d >= best.d && !prefer) continue;
             best = { id: ring[i], region: r.id, d };
           }
       }
@@ -243,7 +246,25 @@ export function useEditor() {
 
   const expandMirror = useCallback((kind: 'vertex' | 'edge', item: string, owner: string, scope: string[]) => {
     if (!mirrorRef.current) return [];
-    return counterparts(modelRef.current, kind, item, owner, scope);
+    const m = modelRef.current;
+    const mat = m.regions.find((r) => r.id === owner)?.material;
+    const same = scope.filter((id) => m.regions.find((r) => r.id === id)?.material === mat); // 只對應同材質的結構
+    return counterparts(m, kind, item, owner, same);
+  }, []);
+
+  /**
+   * 多結構對應時，點（或邊）算在哪個區域：在含有它的已選區域中，挑已選同材質區域最多的那個
+   * （例如交界上的點同時屬於 fin 和旁邊的 TiN，而已選了好幾根 fin，就算 fin 的）。
+   */
+  const mirrorSource = useCallback((m: Model, ids: string[], fallback: string, scope: string[]) => {
+    const has = (r: Model['regions'][number]) => ringsOf(r).some((ring) => ids.every((id) => ring.includes(id)));
+    const cands = m.regions.filter((r) => scope.includes(r.id) && has(r));
+    let best = fallback, bestN = 0;
+    for (const r of cands) {
+      const n = scope.filter((id) => m.regions.find((x) => x.id === id)?.material === r.material).length;
+      if (n > bestN) { bestN = n; best = r.id; }
+    }
+    return best;
   }, []);
 
   /**
@@ -296,12 +317,29 @@ export function useEditor() {
       const d = Math.hypot(v.x - at.x, v.y - at.y);
       if (d <= bd) { bd = d; best = id; }
     }
-    const next = best ? setHandles(m, [best], true) : insertNode(m, importedRef.current, a, b, [at.x, at.y]).model;
+    let next = best ? setHandles(m, [best], true) : insertNode(m, importedRef.current, a, b, [at.x, at.y]).model;
     const added = best || next.handles[next.handles.length - 1];
+    const ids = [added];
+    // 多個相同結構一起選取時：其他結構的同一個位置也加節點，之後一起拉的結果才會一樣
+    const src = mirrorSource(next, [added], hit.region, regionSelRef.current);
+    const from = next.regions.find((r) => r.id === src);
+    // 只對應同材質的已選區域（例如三根 fin），旁邊被一起選到的襯層不算
+    const others = mirrorRef.current && from && regionSelRef.current.includes(src)
+      ? regionSelRef.current.filter((r) => r !== src && next.regions.find((x) => x.id === r)?.material === from.material)
+      : [];
+    if (from && others.length) {
+      const p = next.vertices[added];
+      for (const rid of others) {
+        const to = next.regions.find((r) => r.id === rid);
+        if (!to) continue;
+        const res = nodeAt(next, importedRef.current, to, mapPoint(next, from, to, [p.x, p.y]));
+        if (res.id) { next = res.model; ids.push(res.id); }
+      }
+    }
     commit(next);
-    setVertexSel([added]);
+    setVertexSel(ids);
     setEdgeSel([]);
-  }, [hitTest, commit]);
+  }, [hitTest, commit, mirrorSource]);
 
   /** 刪除節點：只是不再當節點（不顯示、不能抓），輪廓形狀不變 */
   const deleteNodes = useCallback(() => {
@@ -343,7 +381,8 @@ export function useEditor() {
     }
     if (hit.kind === 'edge') {
       const group = [...hit.group];
-      hit.group.forEach((k) => group.push(...expandMirror('edge', k, hit.region, scope)));
+      const edgeSrc = mirrorSource(m, hit.key.split('|'), hit.region, scope);
+      hit.group.forEach((k) => group.push(...expandMirror('edge', k, edgeSrc, scope)));
       const items = [...new Set(group)];
       const cur = edgeSelRef.current;
       const all = items.every((k) => cur.includes(k));
@@ -361,7 +400,36 @@ export function useEditor() {
       startMove({ start: at, vertexIds: edgeGroupVertices(next), regionIds: scope, detach: false, edgeN });
       return;
     }
-    const items = [hit.id, ...expandMirror('vertex', hit.id, hit.region, scope)];
+    // 對應節點：其他已選結構的同一個位置（沒有節點就在原始輪廓上補一個，不改形狀）
+    const items = [hit.id];
+    if (mirrorRef.current && scope.length > 1 && !mods.ctrl) {
+      let mm = m;
+      const src = mirrorSource(mm, [hit.id], hit.region, scope);
+      const from = mm.regions.find((r) => r.id === src)!;
+      // 被拖節點左右兩邊最近的節點（拉動時線只改到這兩點為止），也要在其他結構對應位置有節點，彎曲範圍才一致
+      const ring = ringsOf(from).find((rg) => rg.includes(hit.id)) ?? from.loop;
+      const anchors: string[] = [];
+      for (const step of [1, -1]) {
+        let k = ring.indexOf(hit.id);
+        for (let c = 0; c < ring.length - 1; c++) {
+          k = (k + step + ring.length) % ring.length;
+          if (handleSetRef.current.has(ring[k])) { anchors.push(ring[k]); break; }
+        }
+      }
+      for (const rid of scope) {
+        if (rid === src) continue;
+        const to = mm.regions.find((r) => r.id === rid);
+        if (!to || to.material !== from.material) continue; // 只對應同材質的結構
+        for (const id of [hit.id, ...anchors]) {
+          const p = mm.vertices[id];
+          const res = nodeAt(mm, importedRef.current, mm.regions.find((r) => r.id === rid) ?? to, mapPoint(mm, from, to, [p.x, p.y]));
+          if (!res.id) continue;
+          mm = res.model;
+          if (id === hit.id) items.push(res.id);
+        }
+      }
+      if (mm !== m) commit(mm);
+    }
     const cur = vertexSelRef.current;
     let next: string[];
     if (mods.ctrl) next = cur.includes(hit.id) ? cur.filter((v) => !items.includes(v)) : [...new Set([...cur, ...items])];
@@ -371,7 +439,7 @@ export function useEditor() {
     setEdgeSel([]);
     if (mods.ctrl) return;
     startMove({ start: at, vertexIds: next, regionIds: scope, detach: false, falloff: true });
-  }, [hitTest, clearSel, startMove, edgeByKey, expandMirror, addNodeAt]);
+  }, [hitTest, clearSel, startMove, edgeByKey, expandMirror, addNodeAt, commit, mirrorSource]);
 
   const pointerMove = useCallback((at: Pt) => {
     const g = gestureRef.current;

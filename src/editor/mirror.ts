@@ -1,5 +1,7 @@
-import { bboxOf, edgeKey, polyOf } from '../model/geometry';
-import type { Model, Region, XY } from '../model/types';
+import { bboxOf, edgeKey, polyOf, segDist } from '../model/geometry';
+import { setHandles } from '../model/ops';
+import type { Imported, Model, Region, XY } from '../model/types';
+import { insertNode } from '../raster/nodes';
 
 /**
  * 對應項目：把座標正規化到所屬區域外框的 [0,1]²，
@@ -44,4 +46,36 @@ export function counterparts(model: Model, kind: 'vertex' | 'edge', item: string
     }
   }
   return out;
+}
+
+/** 把 from 區域上的點，依外框比例對應到 to 區域上的位置 */
+export function mapPoint(model: Model, from: Region, to: Region, p: XY): XY {
+  const a = bboxOf(polyOf(model, from)), b = bboxOf(polyOf(model, to));
+  const u = (p[0] - a.x0) / Math.max(1e-6, a.x1 - a.x0), v = (p[1] - a.y0) / Math.max(1e-6, a.y1 - a.y0);
+  return [b.x0 + u * (b.x1 - b.x0), b.y0 + v * (b.y1 - b.y0)];
+}
+
+/**
+ * 在區域輪廓上找 p 位置的節點：1 px 內已有輪廓點就把它設成節點，否則在最近的邊上（沿原始像素輪廓）新增一個。
+ * 新增節點不改形狀；用在多個相同結構一起編輯時，讓每個結構在同一個位置都有節點。
+ */
+export function nodeAt(model: Model, imp: Imported, region: Region, p: XY): { model: Model; id: string } {
+  let best = '', bd = 1;
+  for (const ring of [region.loop, ...(region.holes ?? [])])
+    for (const id of ring) {
+      const v = model.vertices[id];
+      const d = Math.hypot(v.x - p[0], v.y - p[1]);
+      if (d <= bd) { bd = d; best = id; }
+    }
+  if (best) return { model: model.handles.includes(best) ? model : setHandles(model, [best], true), id: best };
+  let edge: [string, string] | null = null, ed = Infinity;
+  for (const ring of [region.loop, ...(region.holes ?? [])])
+    ring.forEach((a, i) => {
+      const b = ring[(i + 1) % ring.length];
+      const A = model.vertices[a], B = model.vertices[b];
+      const d = segDist(p, [A.x, A.y], [B.x, B.y]);
+      if (d < ed) { ed = d; edge = [a, b]; }
+    });
+  if (!edge) return { model, id: '' };
+  return insertNode(model, imp, edge[0], edge[1], p);
 }
