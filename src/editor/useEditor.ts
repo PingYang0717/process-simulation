@@ -138,10 +138,12 @@ export function useEditor() {
     setView({ s, tx: (w - ww * s) / 2 - wd.x0 * s, ty: (h - wh * s) / 2 - wd.yTop * s });
   }, []);
 
-  const setCanvasSize = useCallback((w: number, h: number) => {
+  /** 畫布量到新尺寸：立刻更新 ref（之後的 fit 才不會用到舊尺寸），尺寸有變或要求時重新置中 */
+  const setCanvasSize = useCallback((w: number, h: number, forceFit = false) => {
     const prev = canvasRef.current;
+    canvasRef.current = { w, h };
     setCanvas({ w, h });
-    if (Math.abs(prev.w - w) > 2 || Math.abs(prev.h - h) > 2) fit(w, h);
+    if (forceFit || Math.abs(prev.w - w) > 2 || Math.abs(prev.h - h) > 2) fit(w, h);
   }, [fit]);
 
   /** 以 (px, py) 為中心縮放，預設畫布中心 */

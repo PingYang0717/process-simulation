@@ -58,6 +58,7 @@ export function RasterUnderlay({ imported, output, diffMask, showDiff, underlay,
       ctx.lineWidth = Math.max(1.5, view.s * 0.12) / view.s;
       ctx.stroke(outline);
     }
-  }, [underlay, outImg, origImg, outline, view, w, h]);
+    // 離屏 canvas 是同一個物件、內容就地更新，所以要直接依 output／original 重畫，不能只看 outImg
+  }, [underlay, outImg, origImg, output, imported.original, outline, view, w, h]);
   return <canvas ref={ref} width={w} height={h} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />;
 }

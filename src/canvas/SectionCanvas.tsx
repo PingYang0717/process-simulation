@@ -44,6 +44,15 @@ function labelAnchor(pts: XY[], minW: number, textH: number): XY | null {
   return best?.p ?? null;
 }
 
+/** 手形（antd 圖示集沒有） */
+const HandIcon = () => (
+  <span className="anticon" aria-hidden="true">
+    <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12M11 11.5v-7a1.5 1.5 0 0 1 3 0V12M14 6.5a1.5 1.5 0 0 1 3 0V12M17 9.5a1.5 1.5 0 0 1 3 0V15a7 7 0 0 1-7 7h-1.5a7 7 0 0 1-5.6-2.8L3.4 15.7a1.6 1.6 0 0 1 2.4-2.1L8 15.5" />
+    </svg>
+  </span>
+);
+
 /** 浮在畫布上的小面板（移動／往外推），位置為畫布內座標 */
 type Panel = { kind: 'move' | 'push'; x: number; y: number };
 
@@ -56,29 +65,35 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
   const [cursorPt, setCursorPt] = useState<XY | null>(null); // 前後比對時，左邊原圖上同步的十字
   const [peek, setPeek] = useState(false); // 按住 B 暫時看原圖
   const [panel, setPanel] = useState<Panel | null>(null);
+  const [outside, setOutside] = useState(false); // 游標在圖片外：可以拖曳移動畫面
   const pan = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
   const spaceDown = useRef(false);
 
   useEffect(() => {
     if (!wrapRef.current) return;
+    let first = true; // 第一次量到真正尺寸時一定置中
     const ro = new ResizeObserver(([entry]) => {
       const w = Math.floor(entry.contentRect.width), h = Math.floor(entry.contentRect.height);
       setSize({ w, h });
-      ed.setCanvasSize(w, h);
+      ed.setCanvasSize(w, h, first);
+      first = false;
     });
     ro.observe(wrapRef.current);
     return () => ro.disconnect();
   }, [ed.setCanvasSize]);
 
-  // React 的 onWheel 擋不住頁面捲動，手動掛 passive:false；Shift+滾輪為水平平移
+  // React 的 onWheel 擋不住頁面捲動，手動掛 passive:false。
+  // 觸控板雙指捲動 = 平移；捏合或 Ctrl／⌘+滾輪 = 縮放；一般滑鼠滾輪 = 縮放（Shift 改成水平平移）
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
     const h = (e: WheelEvent) => {
       e.preventDefault();
       const r = svg.getBoundingClientRect();
-      if (e.ctrlKey || !e.shiftKey) ed.zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
-      else ed.panBy(-e.deltaY, 0);
+      const mouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 40);
+      if (e.ctrlKey || e.metaKey || (mouseWheel && !e.shiftKey)) ed.zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX - r.left, e.clientY - r.top);
+      else if (mouseWheel) ed.panBy(-e.deltaY, 0);
+      else ed.panBy(-e.deltaX, -e.deltaY);
     };
     svg.addEventListener('wheel', h, { passive: false });
     return () => svg.removeEventListener('wheel', h);
@@ -129,7 +144,13 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
     const r = svgRef.current!.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
-  const isPan = (e: RPointerEvent) => ed.panMode || spaceDown.current || e.button === 1;
+  /** 平移：手形模式、按住空白鍵、中鍵，或在圖片外面按住拖 */
+  const isPan = (e: RPointerEvent) => {
+    if (ed.panMode || spaceDown.current || e.button === 1) return true;
+    if (e.button !== 0) return false;
+    const at = pxAt(e), wd = model.world;
+    return (at.x < wd.x0 || at.x > wd.x1 || at.y < wd.yTop || at.y > wd.yBot) && ed.hitTest(at).kind === 'none';
+  };
 
   const onDown = (e: RPointerEvent) => {
     svgRef.current?.setPointerCapture(e.pointerId);
@@ -151,12 +172,14 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
       return;
     }
     const at = pxAt(e);
+    const wd = model.world;
+    setOutside(at.x < wd.x0 || at.x > wd.x1 || at.y < wd.yTop || at.y > wd.yBot);
     if (underlay === 'compare') setCursorPt([at.x, at.y]);
     ed.pointerMove(at);
   };
 
   // 游標：節點 → 十字、邊 → 垂直於邊的雙箭頭、區域 → 四箭頭
-  const cursor = ed.panMode ? 'grab'
+  const cursor = ed.panMode || pan.current || (outside && hover.kind === 'none') ? 'grab'
     : hover.kind === 'vertex' ? 'crosshair'
     : hover.kind === 'edge' ? (() => {
       const e = ed.edgeByKey.get(hover.key);
@@ -250,7 +273,8 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
   const hint = ed.delta
     ? `Δx ${signed(ed.delta.dx)} px、Δy ${signed(ed.delta.dy)} px${ed.followInfo.layers ? `｜外面 ${ed.followInfo.layers} 層一起推` : ''}${ed.followInfo.blocked ? '｜已停住（再推會穿過旁邊的層）' : ''}`
     : ed.hold === 'V' ? '顯示全部輪廓點（放開 V 回到節點）'
-    : '拖曳區域搬移 · 拖曳邊推移 · 雙擊邊新增節點 · 右鍵更多';
+    : ed.panMode ? '拖曳移動畫面（按 H 或 Esc 結束）'
+    : '拖曳區域搬移 · 拖曳邊推移 · 雙擊邊新增節點 · 右鍵更多 · 圖片外拖曳可移動畫面';
 
   return (
     <div className="canvas-area">
@@ -474,6 +498,10 @@ export function SectionCanvas({ ed, underlay, result, overlayAlpha, showDiff, sh
             <Divider type="vertical" style={{ margin: '0 4px' }} />
             <Tooltip title="看整張圖（F）"><Button type="text" size="small" onClick={() => ed.fit()}>適合視窗</Button></Tooltip>
             <Button type="text" size="small" onClick={() => ed.setZoom(1)}>1:1</Button>
+            <Divider type="vertical" style={{ margin: '0 4px' }} />
+            <Tooltip title="拖曳畫面（H）；也可以在圖片外面按住拖、按住空白鍵拖，或用觸控板雙指移動">
+              <Button type={ed.panMode ? 'primary' : 'text'} size="small" icon={<HandIcon />} onClick={() => ed.setPanMode(!ed.panMode)} aria-label="拖曳畫面" />
+            </Tooltip>
           </div>
         </div>
       </div>
